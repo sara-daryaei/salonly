@@ -162,7 +162,7 @@ async function initializeSchema() {
   await sql`
     do $$ begin
       create type appointment_status as enum ('pending', 'confirmed', 'completed', 'cancelled', 'no_show');
-    exception when duplicate_object then null;
+    exception when duplicate_object or duplicate_table then null;
     end $$
   `;
   await sql`
@@ -251,14 +251,21 @@ async function initializeSchema() {
   `;
   await sql`
     do $$ begin
-      alter table appointments
-        add constraint appointments_no_staff_overlap
-        exclude using gist (
-          staff_id with =,
-          tstzrange(start_at, end_at, '[)') with &&
-        )
-        where (status in ('pending', 'confirmed'));
-    exception when duplicate_object then null;
+      if not exists (
+        select 1
+        from pg_constraint
+        where conname = 'appointments_no_staff_overlap'
+          and conrelid = 'appointments'::regclass
+      ) then
+        alter table appointments
+          add constraint appointments_no_staff_overlap
+          exclude using gist (
+            staff_id with =,
+            tstzrange(start_at, end_at, '[)') with &&
+          )
+          where (status in ('pending', 'confirmed'));
+      end if;
+    exception when duplicate_object or duplicate_table then null;
     end $$
   `;
 

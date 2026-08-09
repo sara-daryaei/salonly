@@ -2,7 +2,7 @@ create extension if not exists btree_gist;
 
 do $$ begin
   create type user_role as enum ('customer', 'staff', 'admin');
-exception when duplicate_object then null;
+exception when duplicate_object or duplicate_table then null;
 end $$;
 
 do $$ begin
@@ -119,15 +119,22 @@ create table if not exists appointments (
 );
 
 do $$ begin
-  alter table appointments
-    add constraint appointments_no_staff_overlap
-    exclude using gist (
-      staff_id with =,
-      tstzrange(start_at, end_at, '[)') with &&
-    )
-    where (status in ('pending', 'confirmed'));
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname = 'appointments_no_staff_overlap'
+      and conrelid = 'appointments'::regclass
+  ) then
+    alter table appointments
+      add constraint appointments_no_staff_overlap
+      exclude using gist (
+        staff_id with =,
+        tstzrange(start_at, end_at, '[)') with &&
+      )
+      where (status in ('pending', 'confirmed'));
+  end if;
 exception
-  when duplicate_object then null;
+  when duplicate_object or duplicate_table then null;
 end $$;
 
 create table if not exists reviews (
