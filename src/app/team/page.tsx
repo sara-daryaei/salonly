@@ -1,13 +1,21 @@
 import Link from "next/link";
 import { Eyebrow, PublicPage } from "@/components/public-shell";
+import { localeFromSearchParams, localizedHref, serviceText } from "@/lib/i18n";
 import { serviceById, staff } from "@/lib/salon-data";
 
-export default function TeamPage() {
+type PageProps = {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+};
+
+export default async function TeamPage({ searchParams }: PageProps) {
+  const locale = localeFromSearchParams(await searchParams);
+  const nl = locale === "nl";
+
   return (
-    <PublicPage>
+    <PublicPage locale={locale}>
       <section className="mx-auto max-w-7xl px-4 py-20 sm:px-6 lg:px-8">
-        <Eyebrow>Salon team</Eyebrow>
-        <h1 className="mt-4 font-serif text-6xl">Meet the people behind your hair.</h1>
+        <Eyebrow>{nl ? "Salonteam" : "Salon team"}</Eyebrow>
+        <h1 className="mt-4 font-serif text-6xl">{nl ? "Ontmoet de mensen achter je haar." : "Meet the people behind your hair."}</h1>
       </section>
       <section className="mx-auto grid max-w-7xl gap-8 px-4 pb-24 sm:px-6 lg:px-8">
         {staff.map((person) => (
@@ -19,11 +27,11 @@ export default function TeamPage() {
               <p className="mt-2 text-lg font-semibold text-[#6d4f35]">{person.title}</p>
               <p className="mt-5 max-w-2xl leading-7 text-[#68584d]">{person.bio}</p>
               <div className="mt-6 grid gap-6 md:grid-cols-3">
-                <Info title="Specialties" items={person.specialties} />
-                <Info title="Languages" items={person.languages} />
-                <Info title="Services" items={person.services.map((id) => serviceById(id).name)} />
+                <Info title={nl ? "Specialiteiten" : "Specialties"} items={person.specialties} />
+                <Info title={nl ? "Talen" : "Languages"} items={person.languages} />
+                <Info title={nl ? "Diensten" : "Services"} items={person.services.map((id) => serviceText(serviceById(id), locale).name)} />
               </div>
-              <Link href={`/book?staff=${person.id}`} className="mt-8 inline-flex rounded-full bg-[#2f2118] px-5 py-3 font-semibold text-white">Book with {person.firstName}</Link>
+              <Link href={localizedHref(`/book?staff=${person.id}`, locale)} className="mt-8 inline-flex rounded-full bg-[#2f2118] px-5 py-3 font-semibold text-white">{nl ? `Boek bij ${person.firstName}` : `Book with ${person.firstName}`}</Link>
             </div>
           </article>
         ))}

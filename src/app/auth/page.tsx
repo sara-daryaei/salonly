@@ -1,10 +1,17 @@
 import Link from "next/link";
 import { ShieldCheck } from "lucide-react";
 import { Eyebrow, PublicPage } from "@/components/public-shell";
+import { localeFromSearchParams } from "@/lib/i18n";
 
-export default function AuthPage() {
+type PageProps = {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+};
+
+export default async function AuthPage({ searchParams }: PageProps) {
+  const locale = localeFromSearchParams(await searchParams);
+
   return (
-    <PublicPage>
+    <PublicPage locale={locale}>
       <section className="grid min-h-screen place-items-center px-4 py-16">
         <div className="grid w-full max-w-5xl overflow-hidden rounded-[2rem] border border-[#34251c]/10 bg-[#fffaf4] shadow-2xl shadow-[#2f2118]/10 lg:grid-cols-[1fr_0.9fr]">
           <div className="bg-[#2f2118] p-8 text-white sm:p-12">

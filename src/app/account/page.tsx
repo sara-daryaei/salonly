@@ -1,15 +1,21 @@
 import Link from "next/link";
 import { CalendarX, RefreshCw, Star, UserRound } from "lucide-react";
 import { PublicPage, Eyebrow } from "@/components/public-shell";
+import { localeFromSearchParams } from "@/lib/i18n";
 import { appointments, serviceById, staffById } from "@/lib/salon-data";
 
-export default function AccountPage() {
+type PageProps = {
+  searchParams?: Promise<Record<string, string | string[] | undefined>>;
+};
+
+export default async function AccountPage({ searchParams }: PageProps) {
+  const locale = localeFromSearchParams(await searchParams);
   const upcoming = appointments.filter((appointment) => ["pending", "confirmed"].includes(appointment.status)).slice(0, 5);
   const past = appointments.filter((appointment) => appointment.status === "completed").slice(0, 4);
   const cancelled = appointments.filter((appointment) => appointment.status === "cancelled");
 
   return (
-    <PublicPage>
+    <PublicPage locale={locale}>
       <section className="mx-auto max-w-7xl px-4 py-16 sm:px-6 lg:px-8">
         <div className="grid gap-8 lg:grid-cols-[300px_1fr]">
           <aside className="h-max rounded-[2rem] border border-[#34251c]/10 bg-[#fffaf4] p-6">
