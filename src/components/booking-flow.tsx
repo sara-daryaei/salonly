@@ -182,7 +182,7 @@ export function BookingFlow() {
   }
 
   return (
-    <section className="mx-auto grid max-w-7xl gap-8 px-4 pb-24 sm:px-6 lg:grid-cols-[1fr_380px] lg:px-8">
+    <section className="mx-auto grid w-full max-w-7xl gap-8 overflow-hidden px-4 pb-24 sm:px-6 xl:grid-cols-[minmax(0,1fr)_360px] xl:px-8">
       <div className="space-y-6">
         <Step number={1} title={copy.service}>
           <div className="grid gap-3 md:grid-cols-2">
@@ -290,7 +290,7 @@ export function BookingFlow() {
         </Step>
       </div>
 
-      <aside className="h-max rounded-[2rem] border border-[#34251c]/10 bg-[#fffaf4] p-6 shadow-xl shadow-[#2f2118]/10 lg:sticky lg:top-24">
+      <aside className="h-max min-w-0 rounded-[2rem] border border-[#34251c]/10 bg-[#fffaf4] p-6 shadow-xl shadow-[#2f2118]/10 xl:sticky xl:top-24">
         <Eyebrow>{copy.summary}</Eyebrow>
         <div className="mt-5 space-y-3 text-sm">
           <Summary label={copy.service.replace("Choose ", "").replace("Kies ", "")} value={selectedService ? serviceText(selectedService, locale).name : "-"} />
