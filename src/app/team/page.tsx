@@ -1,6 +1,5 @@
-import Link from "next/link";
 import { Eyebrow, PublicPage } from "@/components/public-shell";
-import { localeFromSearchParams, localizedHref, serviceText } from "@/lib/i18n";
+import { localeFromSearchParams, serviceText } from "@/lib/i18n";
 import { serviceById, staff } from "@/lib/salon-data";
 
 type PageProps = {
@@ -31,7 +30,6 @@ export default async function TeamPage({ searchParams }: PageProps) {
                 <Info title={nl ? "Talen" : "Languages"} items={person.languages} />
                 <Info title={nl ? "Diensten" : "Services"} items={person.services.map((id) => serviceText(serviceById(id), locale).name)} />
               </div>
-              <Link href={localizedHref(`/book?staff=${person.id}`, locale)} className="mt-8 inline-flex rounded-full bg-[#2f2118] px-5 py-3 font-semibold text-white">{nl ? `Boek bij ${person.firstName}` : `Book with ${person.firstName}`}</Link>
             </div>
           </article>
         ))}
