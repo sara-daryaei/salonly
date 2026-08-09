@@ -89,7 +89,7 @@ export const salon = {
 };
 
 export const services: Service[] = [
-  { id: "women-cut", category: "Haircuts", name: "Women's Haircut", description: "A tailored cut with consultation, wash, finish and styling advice.", duration: 60, price: 55, image: "https://images.unsplash.com/photo-1522337660859-02fbefca4702?auto=format&fit=crop&w=900&q=80", active: true },
+  { id: "women-cut", category: "Haircuts", name: "Women's Haircut", description: "A tailored cut with consultation, wash, finish and styling advice.", duration: 60, price: 55, image: "https://images.rawpixel.com/image_800/czNmcy1wcml2YXRlL3Jhd3BpeGVsX2ltYWdlcy93ZWJzaXRlX2NvbnRlbnQvbHIvNDc0LW1rLTQ2NjNfMS5qcGc.jpg", active: true },
   { id: "men-cut", category: "Haircuts", name: "Men's Haircut", description: "Precision cutting, clean finish and styling for everyday shape.", duration: 40, price: 38, image: "https://images.unsplash.com/photo-1621605815971-fbc98d665033?auto=format&fit=crop&w=900&q=80", active: true },
   { id: "kids-cut", category: "Haircuts", name: "Kids Haircut", description: "Gentle, practical haircut for children up to 12 years old.", duration: 30, price: 28, image: "https://images.unsplash.com/photo-1580618672591-eb180b1a973f?auto=format&fit=crop&w=900&q=80", active: true },
   { id: "full-color", category: "Color", name: "Full Color", description: "Rich all-over colour with professional tone selection and gloss finish.", duration: 120, price: 95, image: "https://images.unsplash.com/photo-1562322140-8baeececf3df?auto=format&fit=crop&w=900&q=80", active: true },

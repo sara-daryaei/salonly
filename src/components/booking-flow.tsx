@@ -5,18 +5,23 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { CheckCircle2, ChevronLeft, ChevronRight, Clock, UserRound } from "lucide-react";
 import { Eyebrow } from "@/components/public-shell";
 import { formatDisplayDate, parseLocalDate, TODAY_BRUSSELS } from "@/lib/availability";
+import { normalizeLocale, serviceText, ui } from "@/lib/i18n";
 import { services, staff, type Service } from "@/lib/salon-data";
 
 type FormErrors = Partial<Record<"firstName" | "lastName" | "email" | "phone" | "booking", string>>;
 type AvailabilityDay = { date: string; available: boolean };
 type TimeSlot = { time: string; staffId: string };
 
-const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
-const monthFormatter = new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: "Europe/Brussels" });
+const weekdays = {
+  en: ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+  nl: ["Ma", "Di", "Wo", "Do", "Vr", "Za", "Zo"],
+};
 
 export function BookingFlow() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const locale = normalizeLocale(searchParams.get("lang"));
+  const copy = ui[locale].booking;
   const queryServiceId = searchParams.get("service");
   const queryStaffId = searchParams.get("staff");
   const initialService = services.find((item) => item.id === queryServiceId) ?? null;
@@ -41,6 +46,10 @@ export function BookingFlow() {
   const [customerEmail, setCustomerEmail] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [errors, setErrors] = useState<FormErrors>({});
+  const monthFormatter = useMemo(
+    () => new Intl.DateTimeFormat(locale === "nl" ? "nl-BE" : "en-GB", { month: "long", year: "numeric", timeZone: "Europe/Brussels" }),
+    [locale],
+  );
 
   const capableStaff = useMemo(
     () => (selectedService ? staff.filter((person) => person.services.includes(selectedService.id)) : []),
@@ -118,10 +127,10 @@ export function BookingFlow() {
 
   function validateForm() {
     const nextErrors: FormErrors = {};
-    if (!customerFirstName.trim()) nextErrors.firstName = "First name is required.";
-    if (!customerLastName.trim()) nextErrors.lastName = "Last name is required.";
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail.trim())) nextErrors.email = "Enter a valid email.";
-    if (!/^\+?[0-9][0-9\s().-]{6,}$/.test(customerPhone.trim())) nextErrors.phone = "Enter a valid phone number.";
+    if (!customerFirstName.trim()) nextErrors.firstName = copy.requiredFirstName;
+    if (!customerLastName.trim()) nextErrors.lastName = copy.requiredLastName;
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customerEmail.trim())) nextErrors.email = copy.invalidEmail;
+    if (!/^\+?[0-9][0-9\s().-]{6,}$/.test(customerPhone.trim())) nextErrors.phone = copy.invalidPhone;
     setErrors(nextErrors);
     return Object.keys(nextErrors).length === 0;
   }
@@ -160,7 +169,7 @@ export function BookingFlow() {
     setSubmitting(false);
 
     if (!response.ok) {
-      setErrors({ booking: data.error ?? "Could not complete booking." });
+      setErrors({ booking: data.error ?? copy.bookingError });
       if (selectedService && selectedProfessional && selectedDate) {
         const refreshed = await fetch(`/api/availability/times?serviceId=${selectedService.id}&staffId=${selectedProfessional}&date=${selectedDate}`).then((res) => res.json());
         setAvailableSlots(refreshed.slots ?? []);
@@ -169,26 +178,26 @@ export function BookingFlow() {
       return;
     }
 
-    router.push(`/book/success?reference=${encodeURIComponent(data.appointment.reference)}`);
+    router.push(`/book/success?reference=${encodeURIComponent(data.appointment.reference)}${locale === "nl" ? "&lang=nl" : ""}`);
   }
 
   return (
     <section className="mx-auto grid max-w-7xl gap-8 px-4 pb-24 sm:px-6 lg:grid-cols-[1fr_380px] lg:px-8">
       <div className="space-y-6">
-        <Step number={1} title="Choose Service">
+        <Step number={1} title={copy.service}>
           <div className="grid gap-3 md:grid-cols-2">
             {services.slice(0, 8).map((service) => (
-              <Choice key={service.id} active={service.id === selectedService?.id} title={service.name} meta={`${service.duration} min · €${service.price}`} onClick={() => chooseService(service)} />
+              <Choice key={service.id} active={service.id === selectedService?.id} title={serviceText(service, locale).name} meta={`${service.duration} min · €${service.price}`} onClick={() => chooseService(service)} />
             ))}
           </div>
         </Step>
 
-        <Step number={2} title="Choose Professional">
+        <Step number={2} title={copy.professional}>
           {!selectedService ? (
-            <EmptyState>Choose a service first.</EmptyState>
+            <EmptyState>{copy.firstService}</EmptyState>
           ) : (
             <div className="grid gap-3 md:grid-cols-2">
-              <Choice active={selectedProfessional === "any"} title="No preference" meta="Any available stylist" onClick={() => chooseProfessional("any")} />
+              <Choice active={selectedProfessional === "any"} title={copy.noPreference} meta={copy.anyStylist} onClick={() => chooseProfessional("any")} />
               {capableStaff.map((person) => (
                 <Choice
                   key={person.id}
@@ -203,22 +212,22 @@ export function BookingFlow() {
           )}
         </Step>
 
-        <Step number={3} title="Choose Date">
+        <Step number={3} title={copy.date}>
           {!selectedService ? (
-            <EmptyState>Choose a service first to open the appointment calendar.</EmptyState>
+            <EmptyState>{copy.firstServiceCalendar}</EmptyState>
           ) : (
             <>
               <div className="mb-4 flex items-center justify-between">
-                <button className="rounded-full border border-[#34251c]/10 bg-white p-2" onClick={() => changeMonth(-1)} aria-label="Previous month">
+                <button className="rounded-full border border-[#34251c]/10 bg-white p-2" onClick={() => changeMonth(-1)} aria-label={copy.previousMonth}>
                   <ChevronLeft size={18} />
                 </button>
                 <h3 className="font-serif text-2xl">{monthFormatter.format(currentMonth)}</h3>
-                <button className="rounded-full border border-[#34251c]/10 bg-white p-2" onClick={() => changeMonth(1)} aria-label="Next month">
+                <button className="rounded-full border border-[#34251c]/10 bg-white p-2" onClick={() => changeMonth(1)} aria-label={copy.nextMonth}>
                   <ChevronRight size={18} />
                 </button>
               </div>
               <div className="grid grid-cols-7 gap-2 text-center text-sm">
-                {weekdays.map((day) => <strong key={day} className="py-2 text-[#9a7a58]">{day}</strong>)}
+                {weekdays[locale].map((day) => <strong key={day} className="py-2 text-[#9a7a58]">{day}</strong>)}
                 {calendarCells(currentMonth, availableDays).map((cell, index) => (
                   cell.date ? (
                     <button
@@ -240,16 +249,16 @@ export function BookingFlow() {
                   ) : <span key={`blank-${index}`} />
                 ))}
               </div>
-              <p className="mt-3 text-sm text-[#68584d]">{checkingDays ? "Checking availability..." : "Available days are clickable. Mondays, Sundays, past dates and fully booked days are disabled."}</p>
+              <p className="mt-3 text-sm text-[#68584d]">{checkingDays ? copy.checking : copy.dateHint}</p>
             </>
           )}
         </Step>
 
-        <Step number={4} title="Choose Time">
+        <Step number={4} title={copy.time}>
           {!selectedDate ? (
-            <EmptyState>Choose a date to see available times.</EmptyState>
+            <EmptyState>{copy.dateFirst}</EmptyState>
           ) : checkingSlots ? (
-            <EmptyState>Checking availability...</EmptyState>
+            <EmptyState>{copy.checking}</EmptyState>
           ) : availableSlots.length ? (
             <div className="grid grid-cols-3 gap-2 sm:grid-cols-7">
               {availableSlots.map((slot) => (
@@ -264,32 +273,32 @@ export function BookingFlow() {
             </div>
           ) : (
             <EmptyState>
-              No appointments are available on this date.
-              <button className="mt-3 block rounded-full bg-[#2f2118] px-4 py-2 text-sm font-semibold text-white" onClick={() => setSelectedDate(null)}>Choose another date</button>
+              {copy.noTimes}
+              <button className="mt-3 block rounded-full bg-[#2f2118] px-4 py-2 text-sm font-semibold text-white" onClick={() => setSelectedDate(null)}>{copy.anotherDate}</button>
             </EmptyState>
           )}
-          <p className="mt-3 text-sm text-[#68584d]">Slots are calculated from opening hours, working hours, breaks, days off, existing appointments and service duration to prevent double bookings.</p>
+          <p className="mt-3 text-sm text-[#68584d]">{copy.slotHint}</p>
         </Step>
 
-        <Step number={5} title="Customer Information">
+        <Step number={5} title={copy.customer}>
           <div className="grid gap-3 md:grid-cols-2">
-            <Field label="First Name" value={customerFirstName} onChange={setCustomerFirstName} error={errors.firstName} />
-            <Field label="Last Name" value={customerLastName} onChange={setCustomerLastName} error={errors.lastName} />
-            <Field label="Email" value={customerEmail} onChange={setCustomerEmail} error={errors.email} />
-            <Field label="Phone" value={customerPhone} onChange={setCustomerPhone} error={errors.phone} placeholder="+32 470 12 34 56" />
+            <Field label={copy.firstName} value={customerFirstName} onChange={setCustomerFirstName} error={errors.firstName} />
+            <Field label={copy.lastName} value={customerLastName} onChange={setCustomerLastName} error={errors.lastName} />
+            <Field label={copy.email} value={customerEmail} onChange={setCustomerEmail} error={errors.email} />
+            <Field label={copy.phone} value={customerPhone} onChange={setCustomerPhone} error={errors.phone} placeholder="+32 470 12 34 56" />
           </div>
         </Step>
       </div>
 
       <aside className="h-max rounded-[2rem] border border-[#34251c]/10 bg-[#fffaf4] p-6 shadow-xl shadow-[#2f2118]/10 lg:sticky lg:top-24">
-        <Eyebrow>Booking summary</Eyebrow>
+        <Eyebrow>{copy.summary}</Eyebrow>
         <div className="mt-5 space-y-3 text-sm">
-          <Summary label="Service" value={selectedService?.name ?? "—"} />
-          <Summary label="Professional" value={selectedProfessional === "any" ? "No preference" : selectedStaff ? `${selectedStaff.firstName} ${selectedStaff.lastName}` : "—"} />
-          <Summary label="Date" value={selectedDate ? formatDisplayDate(selectedDate) : "—"} />
-          <Summary label="Time" value={selectedTime ?? "—"} />
-          <Summary label="Duration" value={selectedService ? `${selectedService.duration} min` : "—"} />
-          <Summary label="Price" value={selectedService ? `€${selectedService.price}` : "—"} />
+          <Summary label={copy.service.replace("Choose ", "").replace("Kies ", "")} value={selectedService ? serviceText(selectedService, locale).name : "-"} />
+          <Summary label={copy.professional.replace("Choose ", "").replace("Kies ", "")} value={selectedProfessional === "any" ? copy.noPreference : selectedStaff ? `${selectedStaff.firstName} ${selectedStaff.lastName}` : "-"} />
+          <Summary label={copy.date.replace("Choose ", "").replace("Kies ", "")} value={selectedDate ? formatDisplayDate(selectedDate) : "-"} />
+          <Summary label={copy.time.replace("Choose ", "").replace("Kies ", "")} value={selectedTime ?? "-"} />
+          <Summary label={copy.duration} value={selectedService ? `${selectedService.duration} min` : "-"} />
+          <Summary label={copy.price} value={selectedService ? `€${selectedService.price}` : "-"} />
         </div>
         {errors.booking ? <p className="mt-4 rounded-2xl bg-red-50 p-3 text-sm font-semibold text-red-700">{errors.booking}</p> : null}
         <button
@@ -297,7 +306,7 @@ export function BookingFlow() {
           onClick={submitBooking}
           className="mt-6 flex w-full items-center justify-center gap-2 rounded-full bg-[#2f2118] px-5 py-4 font-semibold text-white disabled:cursor-not-allowed disabled:bg-[#b2a495]"
         >
-          <CheckCircle2 size={18} /> {submitting ? "Confirming..." : "Confirm Appointment"}
+          <CheckCircle2 size={18} /> {submitting ? copy.confirming : copy.confirm}
         </button>
       </aside>
     </section>

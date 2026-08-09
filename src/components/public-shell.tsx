@@ -1,32 +1,44 @@
 import Link from "next/link";
-import { CalendarDays, Camera, ChevronDown, Scissors } from "lucide-react";
-import { languages, publicNav, salon } from "@/lib/salon-data";
+import { Suspense } from "react";
+import { CalendarDays, Camera, Scissors } from "lucide-react";
+import { LanguageSwitcher } from "@/components/language-switcher";
+import { localizedHref, type Locale, ui } from "@/lib/i18n";
+import { salon } from "@/lib/salon-data";
 
-const hrefFor = (label: string) => `/${label.toLowerCase().replace(" us", "").replaceAll(" ", "-")}`;
+const navItems = [
+  ["services", "/services"],
+  ["team", "/team"],
+  ["gallery", "/gallery"],
+  ["reviews", "/reviews"],
+  ["about", "/about"],
+  ["contact", "/contact"],
+] as const;
 
-export function PublicHeader() {
+export function PublicHeader({ locale = "en" }: { locale?: Locale }) {
+  const copy = ui[locale];
+
   return (
     <header className="sticky top-0 z-50 border-b border-[#34251c]/10 bg-[#f8f3ec]/90 backdrop-blur-xl">
       <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
-        <Link href="/" className="flex items-center gap-3" aria-label={`${salon.displayName} home`}>
+        <Link href={localizedHref("/", locale)} className="flex items-center gap-3" aria-label={`${salon.displayName} home`}>
           <span className="grid h-10 w-10 place-items-center rounded-full border border-[#34251c]/20 bg-[#fffaf4] text-[#6d4f35]">
             <Scissors size={18} />
           </span>
           <span className="font-serif text-xl tracking-wide text-[#2e211a]">{salon.displayName}</span>
         </Link>
         <nav className="hidden items-center gap-6 text-sm text-[#68584d] lg:flex">
-          <Link href="/">Home</Link>
-          {publicNav.map((item) => (
-            <Link key={item} href={hrefFor(item)}>{item}</Link>
+          <Link href={localizedHref("/", locale)}>{copy.nav.home}</Link>
+          {navItems.map(([key, href]) => (
+            <Link key={key} href={localizedHref(href, locale)}>{copy.nav[key]}</Link>
           ))}
         </nav>
         <div className="flex items-center gap-2">
-          <button className="hidden items-center gap-1 rounded-full border border-[#34251c]/15 px-3 py-2 text-sm text-[#68584d] sm:flex" aria-label="Language selector">
-            {languages[0].code.toUpperCase()} <ChevronDown size={14} />
-          </button>
-          <Link href="/account" className="hidden rounded-full px-3 py-2 text-sm font-medium text-[#68584d] md:block">Login</Link>
-          <Link href="/book" className="rounded-full bg-[#2f2118] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-[#2f2118]/15">
-            Book Appointment
+          <Suspense fallback={<span className="hidden h-9 w-[94px] rounded-full border border-[#34251c]/15 sm:block" />}>
+            <LanguageSwitcher locale={locale} />
+          </Suspense>
+          <Link href={localizedHref("/account", locale)} className="hidden rounded-full px-3 py-2 text-sm font-medium text-[#68584d] md:block">{copy.nav.login}</Link>
+          <Link href={localizedHref("/book", locale)} className="rounded-full bg-[#2f2118] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-[#2f2118]/15">
+            {copy.nav.book}
           </Link>
         </div>
       </div>
@@ -34,7 +46,9 @@ export function PublicHeader() {
   );
 }
 
-export function PublicFooter() {
+export function PublicFooter({ locale = "en" }: { locale?: Locale }) {
+  const copy = ui[locale];
+
   return (
     <footer className="bg-[#2f2118] text-[#fff9f0]">
       <div className="mx-auto grid max-w-7xl gap-10 px-4 py-12 sm:px-6 md:grid-cols-[1.2fr_2fr] lg:px-8">
@@ -48,14 +62,14 @@ export function PublicFooter() {
           </div>
         </div>
         <div className="grid grid-cols-2 gap-8 sm:grid-cols-4">
-          <FooterGroup title="Navigation" items={["Home", ...publicNav, "Book"]} />
-          <FooterGroup title="Hours" items={Object.entries(salon.hours).slice(0, 5).map(([day, time]) => `${day}: ${time}`)} />
-          <FooterGroup title="Contact" items={[salon.phone, salon.email, "Avenue Louise 120"]} />
-          <FooterGroup title="Legal" items={["Privacy Policy", "Terms & Conditions", "Cookie Policy"]} />
+          <FooterGroup title={copy.footer.navigation} items={[copy.nav.home, copy.nav.services, copy.nav.team, copy.nav.gallery, copy.nav.reviews, copy.nav.book]} />
+          <FooterGroup title={copy.footer.hours} items={Object.entries(salon.hours).slice(0, 5).map(([day, time]) => `${day}: ${time}`)} />
+          <FooterGroup title={copy.footer.contact} items={[salon.phone, salon.email, "Avenue Louise 120"]} />
+          <FooterGroup title={copy.footer.legal} items={["Privacy Policy", "Terms & Conditions", "Cookie Policy"]} />
         </div>
       </div>
-      <Link href="/book" className="fixed inset-x-4 bottom-4 z-40 rounded-full bg-[#2f2118] py-4 text-center text-sm font-semibold text-white shadow-2xl shadow-black/30 md:hidden">
-        Book Appointment
+      <Link href={localizedHref("/book", locale)} className="fixed inset-x-4 bottom-4 z-40 rounded-full bg-[#2f2118] py-4 text-center text-sm font-semibold text-white shadow-2xl shadow-black/30 md:hidden">
+        {copy.nav.book}
       </Link>
     </footer>
   );
@@ -72,12 +86,12 @@ function FooterGroup({ title, items }: { title: string; items: string[] }) {
   );
 }
 
-export function PublicPage({ children }: { children: React.ReactNode }) {
+export function PublicPage({ children, locale = "en" }: { children: React.ReactNode; locale?: Locale }) {
   return (
     <>
-      <PublicHeader />
+      <PublicHeader locale={locale} />
       <main className="bg-[#f8f3ec] text-[#2e211a]">{children}</main>
-      <PublicFooter />
+      <PublicFooter locale={locale} />
     </>
   );
 }
@@ -86,11 +100,11 @@ export function Eyebrow({ children }: { children: React.ReactNode }) {
   return <p className="text-xs font-semibold uppercase tracking-[0.28em] text-[#9a7a58]">{children}</p>;
 }
 
-export function RatingLine() {
+export function RatingLine({ locale = "en" }: { locale?: Locale }) {
   return (
     <div className="inline-flex items-center gap-3 rounded-full border border-[#34251c]/15 bg-[#fffaf4]/85 px-4 py-2 text-sm text-[#68584d]">
       <span className="font-semibold text-[#2e211a]">{salon.rating} ★</span>
-      <span>Based on {salon.reviewCount} client reviews</span>
+      <span>{ui[locale].footer.reviewLine}</span>
     </div>
   );
 }
