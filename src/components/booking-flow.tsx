@@ -25,6 +25,7 @@ export function BookingFlow() {
   const queryServiceId = searchParams.get("service");
   const queryStaffId = searchParams.get("staff");
   const initialService = services.find((item) => item.id === queryServiceId) ?? null;
+  const serviceLocked = Boolean(initialService);
   const initialStaff = initialService
     ? queryStaffId && staff.some((person) => person.id === queryStaffId && person.services.includes(initialService.id))
       ? queryStaffId
@@ -184,15 +185,27 @@ export function BookingFlow() {
   return (
     <section className="mx-auto grid w-full max-w-7xl gap-8 overflow-hidden px-4 pb-24 sm:px-6 xl:grid-cols-[minmax(0,1fr)_360px] xl:px-8">
       <div className="space-y-6">
-        <Step number={1} title={copy.service}>
-          <div className="grid gap-3 md:grid-cols-2">
-            {services.slice(0, 8).map((service) => (
-              <Choice key={service.id} active={service.id === selectedService?.id} title={serviceText(service, locale).name} meta={`${service.duration} min · €${service.price}`} onClick={() => chooseService(service)} />
-            ))}
-          </div>
-        </Step>
+        {serviceLocked && selectedService ? (
+          <section className="rounded-[2rem] border border-[#34251c]/10 bg-[#fffaf4] p-6">
+            <Eyebrow>{copy.service.replace("Choose ", "").replace("Kies ", "")}</Eyebrow>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="font-serif text-3xl">{serviceText(selectedService, locale).name}</h2>
+                <p className="mt-2 text-sm text-[#68584d]">{selectedService.duration} min · €{selectedService.price}</p>
+              </div>
+            </div>
+          </section>
+        ) : (
+          <Step number={1} title={copy.service}>
+            <div className="grid gap-3 md:grid-cols-2">
+              {services.slice(0, 8).map((service) => (
+                <Choice key={service.id} active={service.id === selectedService?.id} title={serviceText(service, locale).name} meta={`${service.duration} min · €${service.price}`} onClick={() => chooseService(service)} />
+              ))}
+            </div>
+          </Step>
+        )}
 
-        <Step number={2} title={copy.professional}>
+        <Step number={serviceLocked ? 1 : 2} title={copy.professional}>
           {!selectedService ? (
             <EmptyState>{copy.firstService}</EmptyState>
           ) : (
@@ -212,7 +225,7 @@ export function BookingFlow() {
           )}
         </Step>
 
-        <Step number={3} title={copy.date}>
+        <Step number={serviceLocked ? 2 : 3} title={copy.date}>
           {!selectedService ? (
             <EmptyState>{copy.firstServiceCalendar}</EmptyState>
           ) : (
@@ -254,7 +267,7 @@ export function BookingFlow() {
           )}
         </Step>
 
-        <Step number={4} title={copy.time}>
+        <Step number={serviceLocked ? 3 : 4} title={copy.time}>
           {!selectedDate ? (
             <EmptyState>{copy.dateFirst}</EmptyState>
           ) : checkingSlots ? (
@@ -280,7 +293,7 @@ export function BookingFlow() {
           <p className="mt-3 text-sm text-[#68584d]">{copy.slotHint}</p>
         </Step>
 
-        <Step number={5} title={copy.customer}>
+        <Step number={serviceLocked ? 4 : 5} title={copy.customer}>
           <div className="grid gap-3 md:grid-cols-2">
             <Field label={copy.firstName} value={customerFirstName} onChange={setCustomerFirstName} error={errors.firstName} />
             <Field label={copy.lastName} value={customerLastName} onChange={setCustomerLastName} error={errors.lastName} />
