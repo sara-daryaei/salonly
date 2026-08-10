@@ -1,10 +1,12 @@
 import { InternalResourcePage } from "@/components/internal-resource-page";
 import { listSalonOpeningHours } from "@/lib/internal/schedules";
 import { getSalonSettings } from "@/lib/internal/settings";
+import { requireAdminSession } from "@/lib/internal-route-guards";
 
 const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 export default async function AdminSettingsPage() {
+  await requireAdminSession();
   const [settings, hours] = await Promise.all([getSalonSettings(), listSalonOpeningHours()]);
   return (
     <>

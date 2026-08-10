@@ -1,7 +1,9 @@
 import { InternalResourcePage } from "@/components/internal-resource-page";
 import { listCustomers } from "@/lib/internal/customers";
+import { requireAdminSession } from "@/lib/internal-route-guards";
 
 export default async function AdminCustomersPage() {
+  await requireAdminSession();
   const rows = await listCustomers();
   return (
     <InternalResourcePage

@@ -1,7 +1,9 @@
 import { InternalResourcePage } from "@/components/internal-resource-page";
 import { getStaffRevenueReport } from "@/lib/internal/reports";
+import { requireAdminSession } from "@/lib/internal-route-guards";
 
 export default async function AdminReportsPage() {
+  await requireAdminSession();
   const rows = await getStaffRevenueReport();
   return (
     <InternalResourcePage

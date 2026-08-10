@@ -1,13 +1,12 @@
 import { InternalResourcePage } from "@/components/internal-resource-page";
-import { getInternalSession } from "@/lib/internal-auth";
-import { validateInternalSession } from "@/lib/internal-db";
 import { listStaffSchedules } from "@/lib/internal/schedules";
+import { requireStaffSession } from "@/lib/internal-route-guards";
 
 const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 export default async function StaffSchedulePage() {
-  const session = await validateInternalSession(await getInternalSession(), { roles: ["staff"], requireStaff: true });
-  const rows = session?.staffId ? await listStaffSchedules({ staffId: session.staffId }) : [];
+  const session = await requireStaffSession();
+  const rows = await listStaffSchedules({ staffId: session.staffId! });
   return (
     <InternalResourcePage
       eyebrow="My schedule"

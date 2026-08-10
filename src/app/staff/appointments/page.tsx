@@ -1,11 +1,10 @@
 import { InternalResourcePage } from "@/components/internal-resource-page";
-import { getInternalSession } from "@/lib/internal-auth";
-import { validateInternalSession } from "@/lib/internal-db";
 import { listAppointments } from "@/lib/internal/appointments";
+import { requireStaffSession } from "@/lib/internal-route-guards";
 
 export default async function StaffAppointmentsPage() {
-  const session = await validateInternalSession(await getInternalSession(), { roles: ["staff"], requireStaff: true });
-  const rows = session?.staffId ? await listAppointments({ staffId: session.staffId }) : [];
+  const session = await requireStaffSession();
+  const rows = await listAppointments({ staffId: session.staffId! });
   return (
     <InternalResourcePage
       eyebrow="My database appointments"

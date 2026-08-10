@@ -1,7 +1,9 @@
 import { InternalResourcePage } from "@/components/internal-resource-page";
 import { listTransactions } from "@/lib/internal/payments";
+import { requireAdminSession } from "@/lib/internal-route-guards";
 
 export default async function AdminPaymentsPage() {
+  await requireAdminSession();
   const rows = await listTransactions();
   return (
     <InternalResourcePage
