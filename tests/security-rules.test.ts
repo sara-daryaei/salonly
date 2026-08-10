@@ -58,7 +58,9 @@ test("migration includes database-driven salon opening hours", () => {
 
 test("migration includes staff operations protections", () => {
   const migration = readFileSync("database/migrations/004_staff_operations.sql", "utf8");
+  const constraintMigration = readFileSync("database/migrations/005_in_progress_overlap_constraint.sql", "utf8");
   assert.match(migration, /add value if not exists 'in_progress'/);
   assert.match(migration, /staff_work_logs_open_session_idx/);
   assert.match(migration, /customer_notes_customer_created_idx/);
+  assert.match(constraintMigration, /'pending', 'confirmed', 'in_progress'/);
 });
