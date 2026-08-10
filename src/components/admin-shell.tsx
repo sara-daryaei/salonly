@@ -1,8 +1,12 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { Banknote, BarChart3, CalendarDays, LayoutDashboard, LogOut, Package, ReceiptText, Scissors, Settings, Users } from "lucide-react";
 import type { InternalSession } from "@/lib/internal-auth";
 
 export function AdminShell({ children, session }: { children: React.ReactNode; session: InternalSession }) {
+  const pathname = usePathname();
   const nav = [
     ["Overview", "/admin", LayoutDashboard],
     ["Calendar", "/admin/calendar", CalendarDays],
@@ -27,14 +31,14 @@ export function AdminShell({ children, session }: { children: React.ReactNode; s
           </Link>
           <nav className="mt-8 space-y-1">
             {nav.map(([label, href, Icon]) => (
-              <Link key={label as string} href={href as string} className="flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold text-[#52605b] hover:bg-[#eef4ef]">
+              <Link key={label as string} href={href as string} className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold hover:bg-[#eef4ef] ${isActive(pathname, href as string) ? "bg-[#173d35] text-white hover:bg-[#173d35]" : "text-[#52605b]"}`}>
                 <Icon size={17} /> {label as string}
               </Link>
             ))}
           </nav>
           <form action="/api/internal/logout" method="post" className="mt-8">
-            <button className="flex w-full items-center gap-3 rounded-xl border border-black/10 px-3 py-3 text-sm font-semibold text-[#52605b] hover:bg-[#eef4ef]">
-              <LogOut size={17} /> Logout
+            <button className="flex w-full items-center justify-center gap-3 rounded-xl border border-black/10 bg-[#f8f3ee] px-3 py-3 text-sm font-bold text-[#342117] hover:bg-[#efe4d9]">
+              <LogOut size={17} /> Sign out
             </button>
           </form>
         </aside>
@@ -42,4 +46,9 @@ export function AdminShell({ children, session }: { children: React.ReactNode; s
       </div>
     </main>
   );
+}
+
+function isActive(pathname: string, href: string) {
+  if (href === "/admin") return pathname === "/admin";
+  return pathname === href || pathname.startsWith(`${href}/`);
 }

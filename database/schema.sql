@@ -172,7 +172,8 @@ create table if not exists products (
   cost_price numeric not null default 0,
   sale_price numeric not null default 0,
   stock_quantity integer not null default 0,
-  active boolean not null default true
+  active boolean not null default true,
+  updated_at timestamptz not null default now()
 );
 
 create table if not exists product_sales (
@@ -195,6 +196,27 @@ create table if not exists expenses (
   expense_date date not null,
   supplier text,
   created_by uuid references profiles(id),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists product_inventory_audit (
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid not null references products(id),
+  changed_by uuid references profiles(id),
+  quantity_before integer not null,
+  quantity_after integer not null,
+  delta integer not null,
+  reason text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists expense_audit (
+  id uuid primary key default gen_random_uuid(),
+  expense_id uuid,
+  changed_by uuid references profiles(id),
+  action text not null,
+  before_data jsonb,
+  after_data jsonb,
   created_at timestamptz not null default now()
 );
 
