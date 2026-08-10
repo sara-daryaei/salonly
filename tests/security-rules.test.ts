@@ -6,6 +6,8 @@ import { mergeStaffReportingRows } from "../src/lib/reporting";
 
 test("staff appointment status transitions are restricted", () => {
   assert.equal(canTransitionAppointment("pending", "confirmed"), true);
+  assert.equal(canTransitionAppointment("confirmed", "in_progress"), true);
+  assert.equal(canTransitionAppointment("in_progress", "completed"), true);
   assert.equal(canTransitionAppointment("confirmed", "completed"), true);
   assert.equal(canTransitionAppointment("completed", "cancelled"), false);
   assert.equal(canTransitionAppointment("completed", "no_show"), false);
@@ -52,4 +54,11 @@ test("migration includes database-driven salon opening hours", () => {
   const migration = readFileSync("database/migrations/002_salon_opening_hours.sql", "utf8");
   assert.match(migration, /salon_opening_hours/);
   assert.match(migration, /day_of_week integer primary key/);
+});
+
+test("migration includes staff operations protections", () => {
+  const migration = readFileSync("database/migrations/004_staff_operations.sql", "utf8");
+  assert.match(migration, /add value if not exists 'in_progress'/);
+  assert.match(migration, /staff_work_logs_open_session_idx/);
+  assert.match(migration, /customer_notes_customer_created_idx/);
 });

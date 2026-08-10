@@ -39,7 +39,7 @@ export type Review = {
   response?: string;
 };
 
-export type AppointmentStatus = "pending" | "confirmed" | "completed" | "cancelled" | "no_show";
+export type AppointmentStatus = "pending" | "confirmed" | "in_progress" | "completed" | "cancelled" | "no_show";
 
 export type Appointment = {
   id: string;

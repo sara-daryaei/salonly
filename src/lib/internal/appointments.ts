@@ -12,27 +12,25 @@ export type InternalAppointmentRecord = Appointment & {
   staffLastName: string;
 };
 
-export async function listAppointments(filter: { staffId?: string } = {}) {
+export async function listAppointments(filter: { staffId?: string; date?: string; status?: string } = {}) {
   const db = requireDatabase();
-  const rows = filter.staffId
-    ? await db`
+  const rows = await db`
       select a.id::text as appointment_id, a.*, c.id::text as customer_id_text, c.first_name, c.last_name, c.email, c.phone, s.name as service_name, st.first_name as staff_first_name, st.last_name as staff_last_name
       from appointments a
       join customers c on c.id = a.customer_id
       join services s on s.id = a.service_id
       join staff st on st.id = a.staff_id
-      where a.staff_id = ${filter.staffId}
-      order by a.start_at asc
-    `
-    : await db`
-      select a.id::text as appointment_id, a.*, c.id::text as customer_id_text, c.first_name, c.last_name, c.email, c.phone, s.name as service_name, st.first_name as staff_first_name, st.last_name as staff_last_name
-      from appointments a
-      join customers c on c.id = a.customer_id
-      join services s on s.id = a.service_id
-      join staff st on st.id = a.staff_id
+      where (${filter.staffId ?? null}::text is null or a.staff_id = ${filter.staffId ?? null})
+        and (${filter.date ?? null}::text is null or a.start_at >= (${filter.date ?? null}::date at time zone 'Europe/Brussels') and a.start_at < (((${filter.date ?? null}::date + interval '1 day') at time zone 'Europe/Brussels')))
+        and (${filter.status ?? null}::text is null or a.status::text = ${filter.status ?? null})
       order by a.start_at asc
     `;
   return rows.map(mapInternalAppointment);
+}
+
+export async function getStaffAppointment(appointmentId: string, staffId: string) {
+  const rows = await listAppointments({ staffId });
+  return rows.find((appointment) => appointment.appointmentId === appointmentId) ?? null;
 }
 
 function mapInternalAppointment(row: Record<string, unknown>): InternalAppointmentRecord {

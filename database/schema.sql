@@ -6,7 +6,7 @@ exception when duplicate_object or duplicate_table then null;
 end $$;
 
 do $$ begin
-  create type appointment_status as enum ('pending', 'confirmed', 'completed', 'cancelled', 'no_show');
+  create type appointment_status as enum ('pending', 'confirmed', 'in_progress', 'completed', 'cancelled', 'no_show');
 exception when duplicate_object then null;
 end $$;
 
@@ -263,7 +263,7 @@ do $$ begin
         staff_id with =,
         tstzrange(start_at, end_at, '[)') with &&
       )
-      where (status in ('pending', 'confirmed'));
+      where (status in ('pending', 'confirmed', 'in_progress'));
   end if;
 exception
   when duplicate_object or duplicate_table then null;

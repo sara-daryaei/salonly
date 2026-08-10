@@ -1,30 +1,24 @@
-import { getInternalSession } from "@/lib/internal-auth";
-import { completeAppointment, ForbiddenError, InvalidTransitionError, validateInternalSession, ValidationError } from "@/lib/internal-db";
 import { apiError, apiOk } from "@/lib/api-response";
+import { getInternalSession } from "@/lib/internal-auth";
+import { ForbiddenError, InvalidTransitionError, sellAppointmentProduct, validateInternalSession, ValidationError } from "@/lib/internal-db";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   const rawSession = await getInternalSession();
   if (!rawSession) return apiError("Authentication required.", 401);
   const session = await validateInternalSession(rawSession, { roles: ["staff"], requireStaff: true });
-  if (!session || !session.staffId) {
-    return apiError("Forbidden.", 403);
-  }
-
-  const { id } = await context.params;
+  if (!session?.staffId) return apiError("Forbidden.", 403);
   const body = await request.json().catch(() => null);
   if (!body || typeof body !== "object") return apiError("Request body must be valid JSON.", 400);
+  const { id } = await context.params;
   try {
-    await completeAppointment({
+    await sellAppointmentProduct({
       appointmentId: id,
       staffId: session.staffId,
       actorProfileId: session.profileId,
-      amount: Number(body.amount ?? 0),
-      discount: Number(body.discount ?? 0),
-      tip: Number(body.tip ?? 0),
-      paymentMethod: String(body.paymentMethod ?? "card"),
-      note: String(body.note ?? ""),
-      products: Array.isArray(body.products) ? body.products : [],
+      productId: String("productId" in body ? body.productId : ""),
+      quantity: Number("quantity" in body ? body.quantity : 0),
     });
+    return apiOk();
   } catch (error) {
     if (error instanceof ValidationError) return apiError(error.message, 400);
     if (error instanceof ForbiddenError) return apiError("Forbidden.", 403);
@@ -32,6 +26,4 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     console.error(error);
     return apiError("Unexpected server error.", 500);
   }
-
-  return apiOk();
 }

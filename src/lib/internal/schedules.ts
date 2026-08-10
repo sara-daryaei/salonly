@@ -22,3 +22,13 @@ export async function listSalonOpeningHours() {
   const db = requireDatabase();
   return db`select day_of_week, open_time::text, close_time::text, active from salon_opening_hours order by day_of_week`;
 }
+
+export async function listStaffTimeOff(staffId: string) {
+  const db = requireDatabase();
+  return db`
+    select id::text, staff_id, starts_at::text, ends_at::text, reason
+    from staff_time_off
+    where staff_id = ${staffId}
+    order by starts_at desc
+  `;
+}

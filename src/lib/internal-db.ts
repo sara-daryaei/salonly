@@ -1,4 +1,5 @@
 import { createSessionPayload, type InternalRole, type InternalSession } from "@/lib/internal-auth";
+import type { TransactionSql } from "postgres";
 import { requireDatabase } from "@/lib/db";
 import { verifyPassword } from "@/lib/password";
 import { canTransitionAppointment, validateExpenseInput, validatePaymentInput } from "@/lib/security-rules";
@@ -8,6 +9,8 @@ import { listExpenses } from "@/lib/internal/expenses";
 import { listStaff } from "@/lib/internal/staff";
 import { listTransactions } from "@/lib/internal/payments";
 import { getServiceRevenueReport, getStaffRevenueReport } from "@/lib/internal/reports";
+import { listActiveProducts, listProductSales } from "@/lib/internal/products";
+import { getTodayWorkLog } from "@/lib/internal/work-logs";
 import type { Appointment } from "@/lib/salon-data";
 
 export type InternalStaff = {
@@ -109,21 +112,29 @@ export async function recordAuditLog(input: { userId?: string | null; action: st
 }
 
 export async function getStaffDashboardData(staffId: string) {
-  const [appointments, transactions, staffRows] = await Promise.all([
+  const [appointments, transactions, staffRows, products, workLog, productSales] = await Promise.all([
     listAppointments({ staffId }),
     listTransactions({ staffId }),
     listStaff({ staffId }),
+    listActiveProducts(),
+    getTodayWorkLog(staffId),
+    listProductSales({ staffId, dateFrom: getTodayBrussels(), dateTo: getTodayBrussels() }),
   ]);
   const today = getTodayBrussels();
   const todaysAppointments = appointments.filter((appointment) => appointment.date === today);
   const todaysTransactions = transactions.filter((transaction) => brusselsParts(new Date(transaction.created_at as string)).date === today);
+  const nextAppointment = appointments.find((appointment) => ["confirmed", "in_progress"].includes(appointment.status) && appointment.date >= today) ?? null;
   const person = staffRows[0];
   return {
     staff: person,
     appointments,
     todaysAppointments,
+    nextAppointment,
     metrics: calculateMetrics(todaysAppointments, todaysTransactions),
     transactions,
+    products,
+    workLog,
+    productSales,
   };
 }
 
@@ -160,6 +171,7 @@ export async function completeAppointment(input: {
   tip: number;
   paymentMethod: string;
   note: string;
+  products?: { productId: string; quantity: number }[];
 }) {
   const payment = validatePaymentInput(input);
   if (!payment.ok) throw new ValidationError(payment.error);
@@ -172,7 +184,7 @@ export async function completeAppointment(input: {
         notes = concat_ws(E'\n', nullif(notes, ''), nullif(${input.note ? `Service note: ${input.note}` : ""}, ''))
       where id = ${input.appointmentId}
         and staff_id = ${input.staffId}
-        and status in ('pending', 'confirmed')
+        and status in ('pending', 'confirmed', 'in_progress')
       returning id, customer_id, staff_id, service_id, status::text
     `;
     const appointment = updated[0];
@@ -182,6 +194,15 @@ export async function completeAppointment(input: {
       insert into transactions (appointment_id, customer_id, staff_id, amount, discount, tip, payment_method, payment_status, transaction_type)
       values (${input.appointmentId}, ${appointment.customer_id}, ${appointment.staff_id}, ${payment.amount}, ${payment.discount}, ${payment.tip}, ${payment.paymentMethod}, 'paid', 'service')
     `;
+    for (const product of input.products ?? []) {
+      await sellProductInTransaction(tx, {
+        appointmentId: input.appointmentId,
+        staffId: input.staffId,
+        customerId: String(appointment.customer_id),
+        productId: product.productId,
+        quantity: product.quantity,
+      });
+    }
     if (input.note) {
       await tx`
         insert into customer_notes (customer_id, staff_id, note)
@@ -191,6 +212,27 @@ export async function completeAppointment(input: {
     await tx`
       insert into audit_logs (user_id, action, entity_type, entity_id, metadata)
       values (${input.actorProfileId}, 'appointment_completed', 'appointment', ${input.appointmentId}, ${JSON.stringify({ amount: payment.amount, tip: payment.tip, paymentMethod: payment.paymentMethod })})
+    `;
+  });
+}
+
+export async function startAppointment(input: { appointmentId: string; staffId: string; actorProfileId: string }) {
+  const db = requireDatabase();
+  await db.begin(async (tx) => {
+    const [appointment] = await tx`
+      select id::text, status::text
+      from appointments
+      where id = ${input.appointmentId} and staff_id = ${input.staffId}
+      for update
+    `;
+    if (!appointment) throw new ForbiddenError("Not authorized for this appointment.");
+    if (!canTransitionAppointment(appointment.status as Appointment["status"], "in_progress")) {
+      throw new InvalidTransitionError("Appointment cannot be started.");
+    }
+    await tx`update appointments set status = 'in_progress' where id = ${input.appointmentId}`;
+    await tx`
+      insert into audit_logs (user_id, action, entity_type, entity_id, metadata)
+      values (${input.actorProfileId}, 'appointment_started', 'appointment', ${input.appointmentId}, '{}'::jsonb)
     `;
   });
 }
@@ -216,6 +258,60 @@ export async function markAppointmentStatus(input: { appointmentId: string; staf
   });
 }
 
+export async function addStaffAppointmentNote(input: { appointmentId: string; staffId: string; actorProfileId: string; note: string; customerNote?: boolean }) {
+  const note = input.note.trim();
+  if (!note) throw new ValidationError("Note is required.");
+  const db = requireDatabase();
+  await db.begin(async (tx) => {
+    const [appointment] = await tx`
+      select id::text, customer_id::text
+      from appointments
+      where id = ${input.appointmentId} and staff_id = ${input.staffId}
+      for update
+    `;
+    if (!appointment) throw new ForbiddenError("Not authorized for this appointment.");
+    await tx`
+      update appointments
+      set notes = concat_ws(E'\n', nullif(notes, ''), ${`Staff note: ${note}`})
+      where id = ${input.appointmentId}
+    `;
+    if (input.customerNote) {
+      await tx`
+        insert into customer_notes (customer_id, staff_id, note)
+        values (${appointment.customer_id}, ${input.staffId}, ${note})
+      `;
+    }
+    await tx`
+      insert into audit_logs (user_id, action, entity_type, entity_id, metadata)
+      values (${input.actorProfileId}, 'appointment_note_added', 'appointment', ${input.appointmentId}, ${JSON.stringify({ customerNote: Boolean(input.customerNote) })})
+    `;
+  });
+}
+
+export async function sellAppointmentProduct(input: { appointmentId: string; staffId: string; actorProfileId: string; productId: string; quantity: number }) {
+  const db = requireDatabase();
+  await db.begin(async (tx) => {
+    const [appointment] = await tx`
+      select id::text, customer_id::text
+      from appointments
+      where id = ${input.appointmentId} and staff_id = ${input.staffId}
+      for update
+    `;
+    if (!appointment) throw new ForbiddenError("Not authorized for this appointment.");
+    await sellProductInTransaction(tx, {
+      appointmentId: input.appointmentId,
+      staffId: input.staffId,
+      customerId: String(appointment.customer_id),
+      productId: input.productId,
+      quantity: input.quantity,
+    });
+    await tx`
+      insert into audit_logs (user_id, action, entity_type, entity_id, metadata)
+      values (${input.actorProfileId}, 'product_sold', 'appointment', ${input.appointmentId}, ${JSON.stringify({ productId: input.productId, quantity: input.quantity })})
+    `;
+  });
+}
+
 export async function createExpense(input: { actorProfileId: string; category: string; description: string; amount: number; supplier: string; expenseDate: string }) {
   const validation = validateExpenseInput(input);
   if (!validation.ok) throw new ValidationError(validation.error);
@@ -233,6 +329,26 @@ export async function createExpense(input: { actorProfileId: string; category: s
     metadata: { amount: validation.amount, category: validation.category },
   });
   return rows[0].id as string;
+}
+
+async function sellProductInTransaction(tx: TransactionSql<Record<string, never>>, input: { appointmentId: string; staffId: string; customerId: string; productId: string; quantity: number }) {
+  const quantity = Number(input.quantity);
+  if (!Number.isInteger(quantity) || quantity <= 0) throw new ValidationError("Product quantity must be a positive whole number.");
+  const [product] = await tx`
+    update products
+    set stock_quantity = stock_quantity - ${quantity}
+    where id = ${input.productId}
+      and active = true
+      and stock_quantity >= ${quantity}
+    returning id::text, sale_price
+  `;
+  if (!product) throw new InvalidTransitionError("Product is unavailable or does not have enough stock.");
+  const unitPrice = Number(product.sale_price);
+  const totalPrice = unitPrice * quantity;
+  await tx`
+    insert into product_sales (product_id, staff_id, customer_id, appointment_id, quantity, unit_price, total_price)
+    values (${input.productId}, ${input.staffId}, ${input.customerId}, ${input.appointmentId}, ${quantity}, ${unitPrice}, ${totalPrice})
+  `;
 }
 
 function calculateMetrics(appointments: InternalAppointment[], transactions: Record<string, unknown>[]): DashboardMetrics {

@@ -2,7 +2,8 @@ import type { AppointmentStatus } from "@/lib/salon-data";
 
 export const staffStatusTransitions: Record<AppointmentStatus, AppointmentStatus[]> = {
   pending: ["confirmed", "cancelled"],
-  confirmed: ["completed", "cancelled", "no_show"],
+  confirmed: ["in_progress", "completed", "cancelled", "no_show"],
+  in_progress: ["completed", "cancelled", "no_show"],
   completed: [],
   cancelled: [],
   no_show: [],

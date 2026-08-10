@@ -259,7 +259,7 @@ async function getDatabaseAppointmentsForDate(date: string) {
     from appointments
     where start_at >= ${start.toISOString()}
       and start_at <= ${end.toISOString()}
-      and status in ('pending', 'confirmed')
+      and status in ('pending', 'confirmed', 'in_progress')
   `;
   return rows.map((row) => {
     const startParts = brusselsParts(new Date(row.start_at as Date));
