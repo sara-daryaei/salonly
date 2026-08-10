@@ -39,6 +39,18 @@ create table if not exists salon_settings (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists salon_opening_hours (
+  day_of_week integer primary key check (day_of_week between 0 and 6),
+  open_time time,
+  close_time time,
+  active boolean not null default true,
+  updated_at timestamptz not null default now(),
+  check (
+    (active = false and open_time is null and close_time is null)
+    or (active = true and open_time is not null and close_time is not null and close_time > open_time)
+  )
+);
+
 create table if not exists services (
   id text primary key,
   name text not null,

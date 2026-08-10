@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { canTransitionAppointment, validateExpenseInput, validatePaymentInput } from "../src/lib/security-rules";
+import { mergeStaffReportingRows } from "../src/lib/reporting";
 
 test("staff appointment status transitions are restricted", () => {
   assert.equal(canTransitionAppointment("pending", "confirmed"), true);
@@ -32,4 +33,23 @@ test("migration includes duplicate completion and login rate-limit protections",
   assert.match(migration, /transactions_one_service_payment_per_appointment/);
   assert.match(migration, /login_attempts/);
   assert.match(migration, /staff_working_hours_unique_window/);
+});
+
+test("staff revenue aggregation does not fan out transactions across appointments", () => {
+  const rows = mergeStaffReportingRows({
+    staff: [{ id: "sophie", name: "Sophie Laurent" }],
+    appointmentStats: [{ staff_id: "sophie", appointments: 2, completed: 2 }],
+    transactionStats: [{ staff_id: "sophie", revenue: 150, tips: 15, transaction_count: 2 }],
+  });
+
+  assert.equal(rows[0].appointments, 2);
+  assert.equal(rows[0].revenue, 150);
+  assert.equal(rows[0].tips, 15);
+  assert.equal(rows[0].averageTicket, 75);
+});
+
+test("migration includes database-driven salon opening hours", () => {
+  const migration = readFileSync("database/migrations/002_salon_opening_hours.sql", "utf8");
+  assert.match(migration, /salon_opening_hours/);
+  assert.match(migration, /day_of_week integer primary key/);
 });

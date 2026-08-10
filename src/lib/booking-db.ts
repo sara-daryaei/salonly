@@ -5,8 +5,6 @@ import type { Appointment, Service, Staff } from "@/lib/salon-data";
 export { hasDatabase };
 
 const slotIntervalMinutes = 30;
-const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-
 export async function getDatabaseAppointments() {
   const db = requireDatabase();
   const rows = await db`
@@ -150,7 +148,9 @@ export async function validateDatabaseBookingRequest(input: {
 
 export async function getDatabaseAvailability(input: { serviceId: string; staffId?: string; date: string }) {
   const service = await getDatabaseService(input.serviceId);
-  if (!service || !isBookableDate(input.date)) return { availableSlots: [], assignableStaffBySlot: {} as Record<string, string> };
+  const dayOfWeek = parseLocalDate(input.date).getDay();
+  const salonWindows = await getSalonOpeningWindows(dayOfWeek);
+  if (!service || input.date < brusselsParts().date || !salonWindows.length) return { availableSlots: [], assignableStaffBySlot: {} as Record<string, string> };
 
   const candidates = await getDatabaseCapableStaff(input.serviceId, input.staffId);
   const appointments = await getDatabaseAppointmentsForDate(input.date);
@@ -158,7 +158,7 @@ export async function getDatabaseAvailability(input: { serviceId: string; staffI
   const allSlots = new Set<string>();
 
   for (const person of candidates) {
-    const slots = await getStaffSlots(person, service.duration, input.date, appointments);
+    const slots = await getStaffSlots(person, service.duration, input.date, salonWindows, appointments);
     for (const slot of slots) {
       allSlots.add(slot);
       assignableStaffBySlot[slot] ??= person.id;
@@ -285,6 +285,23 @@ async function getWorkingHours(staffId: string, dayOfWeek: number) {
   `;
 }
 
+async function getSalonOpeningWindows(dayOfWeek: number) {
+  const db = requireDatabase();
+  const rows = await db`
+    select open_time::text, close_time::text
+    from salon_opening_hours
+    where day_of_week = ${dayOfWeek}
+      and active = true
+      and open_time is not null
+      and close_time is not null
+    order by open_time
+  `;
+  return rows.map((row) => ({
+    start: String(row.open_time).slice(0, 5),
+    end: String(row.close_time).slice(0, 5),
+  }));
+}
+
 async function hasTimeOff(staffId: string, date: string) {
   const db = requireDatabase();
   const start = brusselsDateTimeToUtc(date, "00:00");
@@ -299,24 +316,34 @@ async function hasTimeOff(staffId: string, date: string) {
   return Boolean(rows[0]);
 }
 
-async function getStaffSlots(person: Staff, duration: number, date: string, appointmentSource: Pick<Appointment, "staffId" | "date" | "start" | "end" | "status">[]) {
+async function getStaffSlots(
+  person: Staff,
+  duration: number,
+  date: string,
+  salonWindows: { start: string; end: string }[],
+  appointmentSource: Pick<Appointment, "staffId" | "date" | "start" | "end" | "status">[],
+) {
   const dayOfWeek = parseLocalDate(date).getDay();
   if (await hasTimeOff(person.id, date)) return [];
   const workingWindows = await getWorkingHours(person.id, dayOfWeek);
   const slots: string[] = [];
 
   for (const window of workingWindows) {
-    const windowStart = timeToMinutes(String(window.start_time).slice(0, 5));
-    const windowEnd = timeToMinutes(String(window.end_time).slice(0, 5));
-    const lunch = window.lunch_start && window.lunch_end ? `${String(window.lunch_start).slice(0, 5)}-${String(window.lunch_end).slice(0, 5)}` : null;
+    const staffStart = timeToMinutes(String(window.start_time).slice(0, 5));
+    const staffEnd = timeToMinutes(String(window.end_time).slice(0, 5));
+    for (const salonWindow of salonWindows) {
+      const windowStart = Math.max(staffStart, timeToMinutes(salonWindow.start));
+      const windowEnd = Math.min(staffEnd, timeToMinutes(salonWindow.end));
+      const lunch = window.lunch_start && window.lunch_end ? `${String(window.lunch_start).slice(0, 5)}-${String(window.lunch_end).slice(0, 5)}` : null;
 
-    for (let start = windowStart; start + duration <= windowEnd; start += slotIntervalMinutes) {
-      const end = start + duration;
-      const startTime = minutesToTime(start);
-      const endTime = minutesToTime(end);
-      const overlapsLunch = lunch ? start < rangeEnd(lunch) && end > rangeStart(lunch) : false;
-      const overlapsAppointment = appointmentSource.some((appointment) => hasConflict(appointment, date, startTime, endTime, person.id));
-      if (!overlapsLunch && !overlapsAppointment) slots.push(startTime);
+      for (let start = windowStart; start + duration <= windowEnd; start += slotIntervalMinutes) {
+        const end = start + duration;
+        const startTime = minutesToTime(start);
+        const endTime = minutesToTime(end);
+        const overlapsLunch = lunch ? start < rangeEnd(lunch) && end > rangeStart(lunch) : false;
+        const overlapsAppointment = appointmentSource.some((appointment) => hasConflict(appointment, date, startTime, endTime, person.id));
+        if (!overlapsLunch && !overlapsAppointment) slots.push(startTime);
+      }
     }
   }
 
@@ -355,12 +382,6 @@ function hasConflict(appointment: Pick<Appointment, "staffId" | "date" | "start"
   const existingStart = timeToMinutes(appointment.start);
   const existingEnd = timeToMinutes(appointment.end);
   return requestedStart < existingEnd && requestedEnd > existingStart;
-}
-
-function isBookableDate(date: string) {
-  if (date < brusselsParts().date) return false;
-  const day = days[parseLocalDate(date).getDay()];
-  return day !== "Monday" && day !== "Sunday";
 }
 
 function parseLocalDate(date: string) {

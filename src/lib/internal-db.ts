@@ -3,6 +3,7 @@ import { requireDatabase } from "@/lib/db";
 import { verifyPassword } from "@/lib/password";
 import { canTransitionAppointment, validateExpenseInput, validatePaymentInput } from "@/lib/security-rules";
 import { brusselsParts, getTodayBrussels } from "@/lib/time";
+import { mergeStaffReportingRows } from "@/lib/reporting";
 import type { Appointment } from "@/lib/salon-data";
 
 export type InternalStaff = {
@@ -138,17 +139,33 @@ export async function getAdminDashboardData() {
     db`select id::text, category, description, amount, expense_date::text, supplier, created_at::text from expenses order by expense_date desc, created_at desc`,
     db`select id::text, staff_id, work_date::text, clock_in::text, clock_out::text, break_minutes, notes from staff_work_logs order by work_date desc`,
     db`
-      select st.id as staff_id, st.first_name || ' ' || st.last_name as name,
-        count(distinct a.id)::int as appointments,
-        count(distinct a.id) filter (where a.status = 'completed')::int as completed,
-        coalesce(sum(t.amount), 0)::numeric as revenue,
-        coalesce(sum(t.tip), 0)::numeric as tips,
-        case when count(t.id) > 0 then coalesce(sum(t.amount), 0) / count(t.id) else 0 end::numeric as average_ticket
+      with appointment_stats as (
+        select staff_id,
+          count(*)::int as appointments,
+          count(*) filter (where status = 'completed')::int as completed
+        from appointments
+        group by staff_id
+      ),
+      transaction_stats as (
+        select staff_id,
+          coalesce(sum(amount), 0)::numeric as revenue,
+          coalesce(sum(tip), 0)::numeric as tips,
+          count(*)::int as transaction_count
+        from transactions
+        where transaction_type = 'service'
+        group by staff_id
+      )
+      select st.id as staff_id,
+        st.first_name || ' ' || st.last_name as name,
+        coalesce(a.appointments, 0)::int as appointments,
+        coalesce(a.completed, 0)::int as completed,
+        coalesce(t.revenue, 0)::numeric as revenue,
+        coalesce(t.tips, 0)::numeric as tips,
+        coalesce(t.transaction_count, 0)::int as transaction_count
       from staff st
-      left join appointments a on a.staff_id = st.id
-      left join transactions t on t.staff_id = st.id and t.transaction_type = 'service'
+      left join appointment_stats a on a.staff_id = st.id
+      left join transaction_stats t on t.staff_id = st.id
       where st.active = true
-      group by st.id, st.first_name, st.last_name
       order by name
     `,
     db`
@@ -172,15 +189,20 @@ export async function getAdminDashboardData() {
     transactions,
     expenses,
     workLogs,
-    revenueByStaff: revenueByStaff.map((row) => ({
-      staffId: String(row.staff_id),
-      name: String(row.name),
-      appointments: Number(row.appointments),
-      completed: Number(row.completed),
-      revenue: Number(row.revenue),
-      averageTicket: Number(row.average_ticket),
-      tips: Number(row.tips),
-    })),
+    revenueByStaff: mergeStaffReportingRows({
+      staff: revenueByStaff.map((row) => ({ id: String(row.staff_id), name: String(row.name) })),
+      appointmentStats: revenueByStaff.map((row) => ({
+        staff_id: String(row.staff_id),
+        appointments: Number(row.appointments),
+        completed: Number(row.completed),
+      })),
+      transactionStats: revenueByStaff.map((row) => ({
+        staff_id: String(row.staff_id),
+        revenue: Number(row.revenue),
+        tips: Number(row.tips),
+        transaction_count: Number(row.transaction_count),
+      })),
+    }),
     revenueByService: revenueByService.map((row) => ({
       serviceId: String(row.service_id),
       name: String(row.name),

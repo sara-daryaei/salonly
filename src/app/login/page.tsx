@@ -8,6 +8,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
   const session = await validateInternalSession(await getInternalSession());
   if (session) redirect(canAccessAdmin(session) ? "/admin" : "/staff");
   const params = await searchParams;
+  const showDemoCredentials = process.env.ENABLE_DEMO_SEED === "true";
 
   return (
     <main className="min-h-screen bg-[#f5f1eb] px-5 py-10 text-[#2d1c14]">
@@ -32,17 +33,19 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
           {params.error ? <p className="mt-4 rounded-2xl bg-[#fff2ee] px-4 py-3 text-sm font-semibold text-[#9c3d28]">Email or password is incorrect.</p> : null}
           <label className="mt-6 block text-sm font-semibold">
             Email
-            <input name="email" type="email" required className="mt-2 w-full rounded-2xl border border-[#ded2c6] px-4 py-3 outline-none focus:border-[#2d1c14]" placeholder="staff@maisonelegance.be" />
+            <input name="email" type="email" required className="mt-2 w-full rounded-2xl border border-[#ded2c6] px-4 py-3 outline-none focus:border-[#2d1c14]" placeholder="name@example.com" />
           </label>
           <label className="mt-4 block text-sm font-semibold">
             Password
-            <input name="password" type="password" required className="mt-2 w-full rounded-2xl border border-[#ded2c6] px-4 py-3 outline-none focus:border-[#2d1c14]" placeholder="staff123" />
+            <input name="password" type="password" required className="mt-2 w-full rounded-2xl border border-[#ded2c6] px-4 py-3 outline-none focus:border-[#2d1c14]" placeholder="Enter your password" />
           </label>
           <button className="mt-6 w-full rounded-2xl bg-[#2d1c14] px-5 py-4 font-bold text-white shadow-lg shadow-[#2d1c14]/15">Login</button>
-          <div className="mt-5 rounded-2xl bg-[#f7f3ed] p-4 text-sm leading-7 text-[#684d3e]">
-            Staff demo: staff@maisonelegance.be / staff123<br />
-            Admin demo: admin@maisonelegance.be / admin123
-          </div>
+          {showDemoCredentials ? (
+            <div className="mt-5 rounded-2xl bg-[#f7f3ed] p-4 text-sm leading-7 text-[#684d3e]">
+              Staff demo: staff@maisonelegance.be / staff123<br />
+              Admin demo: admin@maisonelegance.be / admin123
+            </div>
+          ) : null}
         </form>
       </section>
     </main>
