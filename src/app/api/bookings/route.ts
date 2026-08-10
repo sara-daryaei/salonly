@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { buildBookingReference, validateBookingRequest } from "@/lib/availability";
 import { createAppointment, findAppointment, mergeAppointments, parseStoredAppointments, serializeStoredAppointments } from "@/lib/booking-store";
-import { AppointmentConflictError, brusselsDateTimeToUtc, createDatabaseAppointment, findDatabaseAppointment, getDatabaseAppointments, hasDatabase } from "@/lib/booking-db";
+import { AppointmentConflictError, brusselsDateTimeToUtc, createDatabaseAppointment, findDatabaseAppointment, getDatabaseAppointments, hasDatabase, validateDatabaseBookingRequest } from "@/lib/booking-db";
 import type { Appointment } from "@/lib/salon-data";
 
 export const dynamic = "force-dynamic";
@@ -53,14 +53,12 @@ async function getDatabaseBookings(request: NextRequest) {
 }
 
 async function createDatabaseBooking(body: Record<string, unknown>) {
-  const appointments = await getDatabaseAppointments();
   const staffId = body.staffId === "any" ? undefined : String(body.staffId);
-  const validation = validateBookingRequest({
+  const validation = await validateDatabaseBookingRequest({
     serviceId: String(body.serviceId),
     staffId,
     date: String(body.date),
     startTime: String(body.startTime),
-    appointments,
   });
 
   if (!validation.ok) {

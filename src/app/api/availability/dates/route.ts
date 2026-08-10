@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAvailability } from "@/lib/availability";
 import { mergeAppointments, parseStoredAppointments } from "@/lib/booking-store";
-import { getDatabaseAppointments, hasDatabase } from "@/lib/booking-db";
+import { getDatabaseAvailability, hasDatabase } from "@/lib/booking-db";
 
 export const dynamic = "force-dynamic";
 
@@ -16,14 +16,17 @@ export async function GET(request: NextRequest) {
     return NextResponse.json({ error: "Missing date availability parameters." }, { status: 400 });
   }
 
-  const appointments = hasDatabase()
-    ? await getDatabaseAppointments()
-    : mergeAppointments(parseStoredAppointments(request.cookies.get("maisonEleganceBookings")?.value));
   const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const availableDates = Array.from({ length: daysInMonth }, (_, index) => {
-    const date = `${year}-${String(month + 1).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`;
-    return getAvailability({ serviceId, staffId, date, appointments }).availableSlots.length ? date : null;
-  }).filter(Boolean);
+  const availableDates = hasDatabase()
+    ? (await Promise.all(Array.from({ length: daysInMonth }, async (_, index) => {
+      const date = `${year}-${String(month + 1).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`;
+      return (await getDatabaseAvailability({ serviceId, staffId, date })).availableSlots.length ? date : null;
+    }))).filter(Boolean)
+    : Array.from({ length: daysInMonth }, (_, index) => {
+      const appointments = mergeAppointments(parseStoredAppointments(request.cookies.get("maisonEleganceBookings")?.value));
+      const date = `${year}-${String(month + 1).padStart(2, "0")}-${String(index + 1).padStart(2, "0")}`;
+      return getAvailability({ serviceId, staffId, date, appointments }).availableSlots.length ? date : null;
+    }).filter(Boolean);
 
   return NextResponse.json({ availableDates });
 }

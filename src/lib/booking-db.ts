@@ -1,34 +1,15 @@
-import postgres from "postgres";
-import { appointments as seedAppointments, services, staff, type Appointment } from "@/lib/salon-data";
+import { hasDatabase, requireDatabase } from "@/lib/db";
+import { brusselsParts } from "@/lib/time";
+import type { Appointment, Service, Staff } from "@/lib/salon-data";
 
-const connectionString = process.env.POSTGRES_URL ?? process.env.DATABASE_URL;
-const sql = connectionString ? postgres(connectionString, { ssl: "require", max: 1 }) : null;
-let schemaReady: Promise<void> | null = null;
+export { hasDatabase };
 
-const dayIndex: Record<string, number> = {
-  Sunday: 0,
-  Monday: 1,
-  Tuesday: 2,
-  Wednesday: 3,
-  Thursday: 4,
-  Friday: 5,
-  Saturday: 6,
-};
-
-export function hasDatabase() {
-  return Boolean(sql);
-}
-
-export async function ensureBookingSchema() {
-  if (!sql) return;
-  schemaReady ??= initializeSchema();
-  await schemaReady;
-}
+const slotIntervalMinutes = 30;
+const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 export async function getDatabaseAppointments() {
-  if (!sql) return [];
-  await ensureBookingSchema();
-  const rows = await sql`
+  const db = requireDatabase();
+  const rows = await db`
     select
       a.id::text,
       a.booking_reference,
@@ -53,9 +34,8 @@ export async function getDatabaseAppointments() {
 }
 
 export async function findDatabaseAppointment(reference: string) {
-  if (!sql) return null;
-  await ensureBookingSchema();
-  const rows = await sql`
+  const db = requireDatabase();
+  const rows = await db`
     select
       a.id::text,
       a.booking_reference,
@@ -93,11 +73,9 @@ export async function createDatabaseAppointment(input: {
   duration: number;
   price: number;
 }) {
-  if (!sql) throw new Error("Database is not configured.");
-  await ensureBookingSchema();
-
+  const db = requireDatabase();
   try {
-    const rows = await sql.begin(async (tx) => {
+    const rows = await db.begin(async (tx) => {
       const [customer] = await tx`
         insert into customers (first_name, last_name, email, phone)
         values (${input.firstName}, ${input.lastName}, ${input.email}, ${input.phone})
@@ -140,6 +118,61 @@ export async function createDatabaseAppointment(input: {
   }
 }
 
+export async function validateDatabaseBookingRequest(input: {
+  serviceId: string;
+  staffId?: string;
+  date: string;
+  startTime: string;
+}) {
+  const service = await getDatabaseService(input.serviceId);
+  if (!service) return { ok: false as const, error: "Selected service does not exist." };
+
+  const availability = await getDatabaseAvailability({
+    serviceId: input.serviceId,
+    staffId: input.staffId,
+    date: input.date,
+  });
+  if (!availability.availableSlots.includes(input.startTime)) {
+    return { ok: false as const, error: "This appointment time is no longer available. Please choose another time." };
+  }
+
+  const resolvedStaffId = input.staffId && input.staffId !== "any" ? input.staffId : availability.assignableStaffBySlot[input.startTime];
+  const person = await getDatabaseStaffForService(resolvedStaffId, input.serviceId);
+  if (!person) return { ok: false as const, error: "Selected professional cannot perform this service." };
+
+  return {
+    ok: true as const,
+    service,
+    staff: person,
+    endTime: minutesToTime(timeToMinutes(input.startTime) + service.duration),
+  };
+}
+
+export async function getDatabaseAvailability(input: { serviceId: string; staffId?: string; date: string }) {
+  const service = await getDatabaseService(input.serviceId);
+  if (!service || !isBookableDate(input.date)) return { availableSlots: [], assignableStaffBySlot: {} as Record<string, string> };
+
+  const candidates = await getDatabaseCapableStaff(input.serviceId, input.staffId);
+  const appointments = await getDatabaseAppointmentsForDate(input.date);
+  const assignableStaffBySlot: Record<string, string> = {};
+  const allSlots = new Set<string>();
+
+  for (const person of candidates) {
+    const slots = await getStaffSlots(person, service.duration, input.date, appointments);
+    for (const slot of slots) {
+      allSlots.add(slot);
+      assignableStaffBySlot[slot] ??= person.id;
+    }
+  }
+
+  return { availableSlots: Array.from(allSlots).sort(), assignableStaffBySlot };
+}
+
+export async function getDatabaseTimeSlots(input: { serviceId: string; staffId?: string; date: string }) {
+  const availability = await getDatabaseAvailability(input);
+  return availability.availableSlots.map((time) => ({ time, staffId: availability.assignableStaffBySlot[time] }));
+}
+
 export class AppointmentConflictError extends Error {
   constructor() {
     super("This appointment time is no longer available.");
@@ -156,193 +189,143 @@ function isExclusionViolation(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "23P01";
 }
 
-async function initializeSchema() {
-  if (!sql) return;
-  await sql`create extension if not exists btree_gist`;
-  await sql`
-    do $$ begin
-      create type appointment_status as enum ('pending', 'confirmed', 'completed', 'cancelled', 'no_show');
-    exception when duplicate_object or duplicate_table then null;
-    end $$
+async function getDatabaseService(serviceId: string) {
+  const db = requireDatabase();
+  const rows = await db`
+    select id, name, category, description, price, duration, image_url, active
+    from services
+    where id = ${serviceId} and active = true
+    limit 1
   `;
-  await sql`
-    create table if not exists services (
-      id text primary key,
-      name text not null,
-      category text not null,
-      description text not null,
-      price integer not null,
-      duration integer not null,
-      image_url text,
-      active boolean not null default true,
-      created_at timestamptz not null default now()
-    )
-  `;
-  await sql`
-    create table if not exists staff (
-      id text primary key,
-      photo_url text,
-      first_name text not null,
-      last_name text not null,
-      job_title text not null,
-      bio text not null,
-      phone text,
-      email text,
-      languages text[] not null default '{}',
-      specialties text[] not null default '{}',
-      active boolean not null default true
-    )
-  `;
-  await sql`
-    create table if not exists staff_services (
-      staff_id text not null references staff(id) on delete cascade,
-      service_id text not null references services(id) on delete cascade,
-      primary key (staff_id, service_id)
-    )
-  `;
-  await sql`
-    create table if not exists staff_working_hours (
-      id uuid primary key default gen_random_uuid(),
-      staff_id text not null references staff(id) on delete cascade,
-      day_of_week integer not null check (day_of_week between 0 and 6),
-      start_time time not null,
-      end_time time not null,
-      lunch_start time,
-      lunch_end time,
-      active boolean not null default true
-    )
-  `;
-  await sql`
-    create table if not exists staff_time_off (
-      id uuid primary key default gen_random_uuid(),
-      staff_id text not null references staff(id) on delete cascade,
-      starts_at timestamptz not null,
-      ends_at timestamptz not null,
-      reason text
-    )
-  `;
-  await sql`
-    create table if not exists customers (
-      id uuid primary key default gen_random_uuid(),
-      first_name text not null,
-      last_name text not null,
-      email text not null,
-      phone text not null,
-      notes text,
-      created_at timestamptz not null default now()
-    )
-  `;
-  await sql`
-    create table if not exists appointments (
-      id uuid primary key default gen_random_uuid(),
-      booking_reference text unique not null,
-      customer_id uuid not null references customers(id),
-      service_id text not null references services(id),
-      staff_id text not null references staff(id),
-      start_at timestamptz not null,
-      end_at timestamptz not null,
-      duration integer not null,
-      price integer not null,
-      status appointment_status not null default 'confirmed',
-      notes text,
-      created_at timestamptz not null default now(),
-      check (end_at > start_at)
-    )
-  `;
-  await sql`
-    do $$ begin
-      if not exists (
-        select 1
-        from pg_constraint
-        where conname = 'appointments_no_staff_overlap'
-          and conrelid = 'appointments'::regclass
-      ) then
-        alter table appointments
-          add constraint appointments_no_staff_overlap
-          exclude using gist (
-            staff_id with =,
-            tstzrange(start_at, end_at, '[)') with &&
-          )
-          where (status in ('pending', 'confirmed'));
-      end if;
-    exception when duplicate_object or duplicate_table then null;
-    end $$
-  `;
-
-  await seedReferenceData();
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    name: String(row.name),
+    category: String(row.category) as Service["category"],
+    description: String(row.description),
+    price: Number(row.price),
+    duration: Number(row.duration),
+    image: String(row.image_url ?? ""),
+    active: Boolean(row.active),
+  };
 }
 
-async function seedReferenceData() {
-  if (!sql) return;
-  for (const service of services) {
-    await sql`
-      insert into services (id, name, category, description, price, duration, image_url, active)
-      values (${service.id}, ${service.name}, ${service.category}, ${service.description}, ${service.price}, ${service.duration}, ${service.image}, ${service.active})
-      on conflict (id) do update set
-        name = excluded.name,
-        category = excluded.category,
-        description = excluded.description,
-        price = excluded.price,
-        duration = excluded.duration,
-        image_url = excluded.image_url,
-        active = excluded.active
+async function getDatabaseStaffForService(staffId: string, serviceId: string) {
+  return (await getDatabaseCapableStaff(serviceId, staffId))[0] ?? null;
+}
+
+async function getDatabaseCapableStaff(serviceId: string, staffId?: string) {
+  const db = requireDatabase();
+  const rows = staffId && staffId !== "any"
+    ? await db`
+      select st.id, st.photo_url, st.first_name, st.last_name, st.job_title, st.bio, st.phone, st.email, st.languages, st.specialties
+      from staff st
+      join staff_services ss on ss.staff_id = st.id
+      where st.active = true and ss.service_id = ${serviceId} and st.id = ${staffId}
+    `
+    : await db`
+      select st.id, st.photo_url, st.first_name, st.last_name, st.job_title, st.bio, st.phone, st.email, st.languages, st.specialties
+      from staff st
+      join staff_services ss on ss.staff_id = st.id
+      where st.active = true and ss.service_id = ${serviceId}
+      order by st.first_name
     `;
-  }
-  for (const person of staff) {
-    await sql`
-      insert into staff (id, photo_url, first_name, last_name, job_title, bio, phone, email, languages, specialties, active)
-      values (${person.id}, ${person.photo}, ${person.firstName}, ${person.lastName}, ${person.title}, ${person.bio}, ${person.phone}, ${person.email}, ${person.languages}, ${person.specialties}, true)
-      on conflict (id) do update set
-        photo_url = excluded.photo_url,
-        first_name = excluded.first_name,
-        last_name = excluded.last_name,
-        job_title = excluded.job_title,
-        bio = excluded.bio,
-        phone = excluded.phone,
-        email = excluded.email,
-        languages = excluded.languages,
-        specialties = excluded.specialties,
-        active = excluded.active
-    `;
-    for (const serviceId of person.services) {
-      await sql`
-        insert into staff_services (staff_id, service_id)
-        values (${person.id}, ${serviceId})
-        on conflict do nothing
-      `;
-    }
-    for (const [day, range] of Object.entries(person.schedule)) {
-      const [start, end] = range.split("-");
-      const lunch = person.lunchBreaks?.[day]?.split("-");
-      await sql`
-        insert into staff_working_hours (staff_id, day_of_week, start_time, end_time, lunch_start, lunch_end, active)
-        values (${person.id}, ${dayIndex[day]}, ${start}, ${end}, ${lunch?.[0] ?? null}, ${lunch?.[1] ?? null}, true)
-      `;
+  return rows.map((row) => ({
+    id: String(row.id),
+    firstName: String(row.first_name),
+    lastName: String(row.last_name),
+    title: String(row.job_title),
+    bio: String(row.bio),
+    photo: String(row.photo_url ?? ""),
+    specialties: Array.isArray(row.specialties) ? row.specialties.map(String) : [],
+    experience: "",
+    languages: Array.isArray(row.languages) ? row.languages.map(String) : [],
+    services: [serviceId],
+    email: String(row.email ?? ""),
+    phone: String(row.phone ?? ""),
+    schedule: {},
+    lunchBreaks: {},
+    timeOff: [],
+  }));
+}
+
+async function getDatabaseAppointmentsForDate(date: string) {
+  const db = requireDatabase();
+  const start = brusselsDateTimeToUtc(date, "00:00");
+  const end = brusselsDateTimeToUtc(date, "23:59");
+  const rows = await db`
+    select id::text, staff_id, start_at, end_at, status::text
+    from appointments
+    where start_at >= ${start.toISOString()}
+      and start_at <= ${end.toISOString()}
+      and status in ('pending', 'confirmed')
+  `;
+  return rows.map((row) => {
+    const startParts = brusselsParts(new Date(row.start_at as Date));
+    const endParts = brusselsParts(new Date(row.end_at as Date));
+    return {
+      id: String(row.id),
+      staffId: String(row.staff_id),
+      date: startParts.date,
+      start: startParts.time,
+      end: endParts.time,
+      status: row.status as Appointment["status"],
+    };
+  });
+}
+
+async function getWorkingHours(staffId: string, dayOfWeek: number) {
+  const db = requireDatabase();
+  return db`
+    select start_time::text, end_time::text, lunch_start::text, lunch_end::text
+    from staff_working_hours
+    where staff_id = ${staffId} and day_of_week = ${dayOfWeek} and active = true
+    order by start_time
+  `;
+}
+
+async function hasTimeOff(staffId: string, date: string) {
+  const db = requireDatabase();
+  const start = brusselsDateTimeToUtc(date, "00:00");
+  const end = brusselsDateTimeToUtc(date, "23:59");
+  const rows = await db`
+    select id
+    from staff_time_off
+    where staff_id = ${staffId}
+      and tstzrange(starts_at, ends_at, '[)') && tstzrange(${start.toISOString()}, ${end.toISOString()}, '[)')
+    limit 1
+  `;
+  return Boolean(rows[0]);
+}
+
+async function getStaffSlots(person: Staff, duration: number, date: string, appointmentSource: Pick<Appointment, "staffId" | "date" | "start" | "end" | "status">[]) {
+  const dayOfWeek = parseLocalDate(date).getDay();
+  if (await hasTimeOff(person.id, date)) return [];
+  const workingWindows = await getWorkingHours(person.id, dayOfWeek);
+  const slots: string[] = [];
+
+  for (const window of workingWindows) {
+    const windowStart = timeToMinutes(String(window.start_time).slice(0, 5));
+    const windowEnd = timeToMinutes(String(window.end_time).slice(0, 5));
+    const lunch = window.lunch_start && window.lunch_end ? `${String(window.lunch_start).slice(0, 5)}-${String(window.lunch_end).slice(0, 5)}` : null;
+
+    for (let start = windowStart; start + duration <= windowEnd; start += slotIntervalMinutes) {
+      const end = start + duration;
+      const startTime = minutesToTime(start);
+      const endTime = minutesToTime(end);
+      const overlapsLunch = lunch ? start < rangeEnd(lunch) && end > rangeStart(lunch) : false;
+      const overlapsAppointment = appointmentSource.some((appointment) => hasConflict(appointment, date, startTime, endTime, person.id));
+      if (!overlapsLunch && !overlapsAppointment) slots.push(startTime);
     }
   }
 
-  const existing = await sql`select count(*)::int as count from appointments`;
-  if (existing[0]?.count) return;
-
-  for (const appointment of seedAppointments) {
-    const [firstName, ...rest] = appointment.customer.split(" ");
-    const lastName = rest.join(" ") || "Client";
-    const [customer] = await sql`
-      insert into customers (first_name, last_name, email, phone)
-      values (${firstName}, ${lastName}, ${appointment.email}, ${appointment.phone})
-      returning id
-    `;
-    await sql`
-      insert into appointments (booking_reference, customer_id, service_id, staff_id, start_at, end_at, duration, price, status, notes)
-      values (${appointment.reference}, ${customer.id}, ${appointment.serviceId}, ${appointment.staffId}, ${brusselsDateTimeToUtc(appointment.date, appointment.start).toISOString()}, ${brusselsDateTimeToUtc(appointment.date, appointment.end).toISOString()}, ${appointment.duration}, ${appointment.price}, ${appointment.status}, ${appointment.notes ?? null})
-      on conflict (booking_reference) do nothing
-    `;
-  }
+  return slots;
 }
 
 function mapAppointmentRow(row: Record<string, unknown>): Appointment {
-  const start = row.start_at as Date;
-  const end = row.end_at as Date;
+  const start = new Date(row.start_at as Date);
+  const end = new Date(row.end_at as Date);
   const startParts = brusselsParts(start);
   const endParts = brusselsParts(end);
   return {
@@ -364,21 +347,44 @@ function mapAppointmentRow(row: Record<string, unknown>): Appointment {
   };
 }
 
-function brusselsParts(value: Date) {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Brussels",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(value);
-  const part = (type: string) => parts.find((item) => item.type === type)?.value ?? "";
-  return {
-    date: `${part("year")}-${part("month")}-${part("day")}`,
-    time: `${part("hour")}:${part("minute")}`,
-  };
+function hasConflict(appointment: Pick<Appointment, "staffId" | "date" | "start" | "end" | "status">, date: string, start: string, end: string, staffId: string) {
+  if (appointment.staffId !== staffId || appointment.date !== date) return false;
+  if (!["pending", "confirmed"].includes(appointment.status)) return false;
+  const requestedStart = timeToMinutes(start);
+  const requestedEnd = timeToMinutes(end);
+  const existingStart = timeToMinutes(appointment.start);
+  const existingEnd = timeToMinutes(appointment.end);
+  return requestedStart < existingEnd && requestedEnd > existingStart;
+}
+
+function isBookableDate(date: string) {
+  if (date < brusselsParts().date) return false;
+  const day = days[parseLocalDate(date).getDay()];
+  return day !== "Monday" && day !== "Sunday";
+}
+
+function parseLocalDate(date: string) {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function rangeStart(range: string) {
+  return timeToMinutes(range.split("-")[0]);
+}
+
+function rangeEnd(range: string) {
+  return timeToMinutes(range.split("-")[1]);
+}
+
+function timeToMinutes(time: string) {
+  const [hours, minutes] = time.split(":").map(Number);
+  return hours * 60 + minutes;
+}
+
+function minutesToTime(total: number) {
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
 }
 
 function getBrusselsOffset(date: string, time: string) {

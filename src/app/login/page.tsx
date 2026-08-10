@@ -2,9 +2,10 @@ import Link from "next/link";
 import { redirect } from "next/navigation";
 import { Scissors } from "lucide-react";
 import { canAccessAdmin, getInternalSession } from "@/lib/internal-auth";
+import { validateInternalSession } from "@/lib/internal-db";
 
 export default async function LoginPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
-  const session = await getInternalSession();
+  const session = await validateInternalSession(await getInternalSession());
   if (session) redirect(canAccessAdmin(session) ? "/admin" : "/staff");
   const params = await searchParams;
 

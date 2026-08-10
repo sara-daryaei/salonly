@@ -214,6 +214,30 @@ create table if not exists audit_logs (
   created_at timestamptz not null default now()
 );
 
+create table if not exists login_attempts (
+  id uuid primary key default gen_random_uuid(),
+  key text not null,
+  ip text not null,
+  email text not null,
+  success boolean not null,
+  profile_id uuid references profiles(id),
+  cooldown_until timestamptz,
+  attempted_at timestamptz not null default now()
+);
+
+create unique index if not exists staff_working_hours_unique_window
+  on staff_working_hours (staff_id, day_of_week, start_time, end_time, coalesce(lunch_start, '00:00'::time), coalesce(lunch_end, '00:00'::time));
+
+create unique index if not exists transactions_one_service_payment_per_appointment
+  on transactions (appointment_id)
+  where transaction_type = 'service' and appointment_id is not null;
+
+create index if not exists login_attempts_key_attempted_at_idx
+  on login_attempts (key, attempted_at desc);
+
+create index if not exists audit_logs_created_at_idx
+  on audit_logs (created_at desc);
+
 do $$ begin
   if not exists (
     select 1
