@@ -2,34 +2,21 @@
 
 import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Banknote, CalendarCheck, CheckCircle2, Clock, CreditCard, LogOut, Scissors, UserRound, XCircle } from "lucide-react";
+import { Banknote, CalendarCheck, CheckCircle2, Clock, CreditCard, UserRound, XCircle } from "lucide-react";
 import type { InternalSession } from "@/lib/internal-auth";
 import type { StaffDashboardData } from "@/lib/internal-db";
+import { paymentMethods } from "@/lib/security-rules";
 
 type StaffAppointment = StaffDashboardData["appointments"][number];
 
 export function StaffDashboard({ data, session }: { data: StaffDashboardData; session: InternalSession }) {
+  void session;
   const router = useRouter();
   const [active, setActive] = useState<StaffAppointment | null>(data.appointments.find((item) => ["pending", "confirmed"].includes(item.status)) ?? data.appointments[0] ?? null);
   const upcoming = useMemo(() => data.appointments.filter((item) => ["pending", "confirmed"].includes(item.status)), [data.appointments]);
 
   return (
-    <main className="min-h-screen bg-[#f7f8f5] text-[#17211f]">
-      <header className="border-b border-black/10 bg-white px-5 py-4">
-        <div className="mx-auto flex max-w-7xl items-center justify-between">
-          <div className="flex items-center gap-3">
-            <span className="grid h-10 w-10 place-items-center rounded-xl bg-[#2f4f46] text-white"><Scissors size={18} /></span>
-            <div>
-              <p className="text-sm font-semibold">Maison Elegance Staff</p>
-              <p className="text-xs text-[#64736d]">{session.name}</p>
-            </div>
-          </div>
-          <form action="/api/internal/logout" method="post">
-            <button className="inline-flex items-center gap-2 rounded-xl border border-black/10 px-4 py-2 text-sm font-bold"><LogOut size={16} /> Logout</button>
-          </form>
-        </div>
-      </header>
-
+    <>
       <div className="mx-auto grid max-w-7xl gap-6 px-5 py-6 xl:grid-cols-[320px_1fr]">
         <aside className="space-y-4">
           <Metric icon={<CalendarCheck size={18} />} label="Today appointments" value={String(data.todaysAppointments.length)} />
@@ -65,7 +52,7 @@ export function StaffDashboard({ data, session }: { data: StaffDashboardData; se
           <AppointmentPanel appointment={active} />
         </section>
       </div>
-    </main>
+    </>
   );
 }
 
@@ -73,6 +60,7 @@ function AppointmentPanel({ appointment }: { appointment: StaffAppointment | nul
   const router = useRouter();
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
   if (!appointment) {
     return <section className="rounded-3xl border border-black/10 bg-white p-5 shadow-sm">Select an appointment.</section>;
@@ -83,6 +71,7 @@ function AppointmentPanel({ appointment }: { appointment: StaffAppointment | nul
     if (!current) return;
     setBusy(true);
     setMessage("");
+    setError("");
     const response = await fetch(`/api/staff/appointments/${current.appointmentId}/complete`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -94,9 +83,10 @@ function AppointmentPanel({ appointment }: { appointment: StaffAppointment | nul
         note: formData.get("note"),
       }),
     });
+    const payload = await response.json().catch(() => null);
     setBusy(false);
     if (!response.ok) {
-      setMessage("Could not complete this appointment.");
+      setError(payload?.error ?? "Could not complete this appointment.");
       return;
     }
     setMessage("Appointment completed and payment recorded.");
@@ -107,13 +97,20 @@ function AppointmentPanel({ appointment }: { appointment: StaffAppointment | nul
     const current = appointment;
     if (!current) return;
     setBusy(true);
+    setMessage("");
+    setError("");
     const response = await fetch(`/api/staff/appointments/${current.appointmentId}/status`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ status }),
     });
+    const payload = await response.json().catch(() => null);
     setBusy(false);
-    setMessage(response.ok ? `Appointment marked ${status.replace("_", " ")}.` : "Could not update appointment.");
+    if (!response.ok) {
+      setError(payload?.error ?? "Could not update appointment.");
+      return;
+    }
+    setMessage(`Appointment marked ${status.replace("_", " ")}.`);
     router.refresh();
   }
 
@@ -130,12 +127,10 @@ function AppointmentPanel({ appointment }: { appointment: StaffAppointment | nul
         <div className="grid grid-cols-3 gap-2">
           <label className="text-xs font-bold">Amount<input name="amount" type="number" step="0.01" defaultValue={appointment.price} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm" /></label>
           <label className="text-xs font-bold">Discount<input name="discount" type="number" step="0.01" defaultValue={0} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm" /></label>
-          <label className="text-xs font-bold">Tip<input name="tip" type="number" step="0.01" defaultValue={10} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm" /></label>
+          <label className="text-xs font-bold">Tip<input name="tip" type="number" step="0.01" defaultValue={0} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm" /></label>
         </div>
         <select name="paymentMethod" defaultValue="card" className="w-full rounded-xl border border-black/10 px-3 py-3 text-sm">
-          <option value="card">Card</option>
-          <option value="cash">Cash</option>
-          <option value="transfer">Bank transfer</option>
+          {paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}
         </select>
         <textarea name="note" rows={4} placeholder="Service notes, formula, customer preferences" className="w-full rounded-xl border border-black/10 px-3 py-3 text-sm" />
         <button disabled={busy} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#2f4f46] px-4 py-3 font-bold text-white"><CheckCircle2 size={18} /> Complete and record payment</button>
@@ -146,6 +141,7 @@ function AppointmentPanel({ appointment }: { appointment: StaffAppointment | nul
         <button disabled={busy} onClick={() => mark("cancelled")} className="inline-flex items-center justify-center gap-2 rounded-xl border border-black/10 px-4 py-3 text-sm font-bold">Cancel</button>
       </div>
       {message ? <p className="mt-4 rounded-xl bg-[#f7f3ed] px-4 py-3 text-sm font-semibold">{message}</p> : null}
+      {error ? <p className="mt-4 rounded-xl bg-[#fff2ee] px-4 py-3 text-sm font-semibold text-[#9c3d28]">{error}</p> : null}
     </section>
   );
 }

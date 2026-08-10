@@ -3,7 +3,11 @@ import { requireDatabase } from "@/lib/db";
 import { verifyPassword } from "@/lib/password";
 import { canTransitionAppointment, validateExpenseInput, validatePaymentInput } from "@/lib/security-rules";
 import { brusselsParts, getTodayBrussels } from "@/lib/time";
-import { mergeStaffReportingRows } from "@/lib/reporting";
+import { listAppointments, type InternalAppointmentRecord } from "@/lib/internal/appointments";
+import { listExpenses } from "@/lib/internal/expenses";
+import { listStaff } from "@/lib/internal/staff";
+import { listTransactions } from "@/lib/internal/payments";
+import { getServiceRevenueReport, getStaffRevenueReport } from "@/lib/internal/reports";
 import type { Appointment } from "@/lib/salon-data";
 
 export type InternalStaff = {
@@ -16,15 +20,7 @@ export type InternalStaff = {
   phone: string;
 };
 
-export type InternalAppointment = Appointment & {
-  appointmentId: string;
-  customerId: string;
-  customerFirstName: string;
-  customerLastName: string;
-  serviceName: string;
-  staffFirstName: string;
-  staffLastName: string;
-};
+export type InternalAppointment = InternalAppointmentRecord;
 
 export type DashboardMetrics = {
   appointments: number;
@@ -114,9 +110,9 @@ export async function recordAuditLog(input: { userId?: string | null; action: st
 
 export async function getStaffDashboardData(staffId: string) {
   const [appointments, transactions, staffRows] = await Promise.all([
-    getAppointments({ staffId }),
-    getTransactions({ staffId }),
-    getStaffRows({ staffId }),
+    listAppointments({ staffId }),
+    listTransactions({ staffId }),
+    listStaff({ staffId }),
   ]);
   const today = getTodayBrussels();
   const todaysAppointments = appointments.filter((appointment) => appointment.date === today);
@@ -134,52 +130,12 @@ export async function getStaffDashboardData(staffId: string) {
 export async function getAdminDashboardData() {
   const db = requireDatabase();
   const [appointments, transactions, expenses, workLogs, revenueByStaff, revenueByService] = await Promise.all([
-    getAppointments({}),
-    getTransactions({}),
-    db`select id::text, category, description, amount, expense_date::text, supplier, created_at::text from expenses order by expense_date desc, created_at desc`,
+    listAppointments({}),
+    listTransactions({}),
+    listExpenses(),
     db`select id::text, staff_id, work_date::text, clock_in::text, clock_out::text, break_minutes, notes from staff_work_logs order by work_date desc`,
-    db`
-      with appointment_stats as (
-        select staff_id,
-          count(*)::int as appointments,
-          count(*) filter (where status = 'completed')::int as completed
-        from appointments
-        group by staff_id
-      ),
-      transaction_stats as (
-        select staff_id,
-          coalesce(sum(amount), 0)::numeric as revenue,
-          coalesce(sum(tip), 0)::numeric as tips,
-          count(*)::int as transaction_count
-        from transactions
-        where transaction_type = 'service'
-        group by staff_id
-      )
-      select st.id as staff_id,
-        st.first_name || ' ' || st.last_name as name,
-        coalesce(a.appointments, 0)::int as appointments,
-        coalesce(a.completed, 0)::int as completed,
-        coalesce(t.revenue, 0)::numeric as revenue,
-        coalesce(t.tips, 0)::numeric as tips,
-        coalesce(t.transaction_count, 0)::int as transaction_count
-      from staff st
-      left join appointment_stats a on a.staff_id = st.id
-      left join transaction_stats t on t.staff_id = st.id
-      where st.active = true
-      order by name
-    `,
-    db`
-      select s.id as service_id, s.name,
-        count(distinct a.id)::int as bookings,
-        coalesce(sum(t.amount), 0)::numeric as revenue
-      from services s
-      left join appointments a on a.service_id = s.id
-      left join transactions t on t.appointment_id = a.id and t.transaction_type = 'service'
-      where s.active = true
-      group by s.id, s.name
-      having count(distinct a.id) > 0
-      order by revenue desc, bookings desc
-    `,
+    getStaffRevenueReport(),
+    getServiceRevenueReport(),
   ]);
   const metrics = calculateMetrics(appointments, transactions);
   const expenseTotal = expenses.reduce((sum, expense) => sum + Number(expense.amount), 0);
@@ -189,26 +145,8 @@ export async function getAdminDashboardData() {
     transactions,
     expenses,
     workLogs,
-    revenueByStaff: mergeStaffReportingRows({
-      staff: revenueByStaff.map((row) => ({ id: String(row.staff_id), name: String(row.name) })),
-      appointmentStats: revenueByStaff.map((row) => ({
-        staff_id: String(row.staff_id),
-        appointments: Number(row.appointments),
-        completed: Number(row.completed),
-      })),
-      transactionStats: revenueByStaff.map((row) => ({
-        staff_id: String(row.staff_id),
-        revenue: Number(row.revenue),
-        tips: Number(row.tips),
-        transaction_count: Number(row.transaction_count),
-      })),
-    }),
-    revenueByService: revenueByService.map((row) => ({
-      serviceId: String(row.service_id),
-      name: String(row.name),
-      bookings: Number(row.bookings),
-      revenue: Number(row.revenue),
-    })),
+    revenueByStaff,
+    revenueByService,
     operationalResult: metrics.revenue - expenseTotal,
   };
 }
@@ -297,52 +235,6 @@ export async function createExpense(input: { actorProfileId: string; category: s
   return rows[0].id as string;
 }
 
-async function getAppointments(filter: { staffId?: string }) {
-  const db = requireDatabase();
-  const rows = filter.staffId
-    ? await db`
-      select a.id::text as appointment_id, a.*, c.id::text as customer_id_text, c.first_name, c.last_name, c.email, c.phone, s.name as service_name, st.first_name as staff_first_name, st.last_name as staff_last_name
-      from appointments a
-      join customers c on c.id = a.customer_id
-      join services s on s.id = a.service_id
-      join staff st on st.id = a.staff_id
-      where a.staff_id = ${filter.staffId}
-      order by a.start_at asc
-    `
-    : await db`
-      select a.id::text as appointment_id, a.*, c.id::text as customer_id_text, c.first_name, c.last_name, c.email, c.phone, s.name as service_name, st.first_name as staff_first_name, st.last_name as staff_last_name
-      from appointments a
-      join customers c on c.id = a.customer_id
-      join services s on s.id = a.service_id
-      join staff st on st.id = a.staff_id
-      order by a.start_at asc
-    `;
-  return rows.map(mapInternalAppointment);
-}
-
-async function getTransactions(filter: { staffId?: string }) {
-  const db = requireDatabase();
-  return filter.staffId
-    ? await db`select id::text, appointment_id::text, customer_id::text, staff_id, amount, discount, tip, payment_method, payment_status, transaction_type, created_at::text from transactions where staff_id = ${filter.staffId} order by created_at desc`
-    : await db`select id::text, appointment_id::text, customer_id::text, staff_id, amount, discount, tip, payment_method, payment_status, transaction_type, created_at::text from transactions order by created_at desc`;
-}
-
-async function getStaffRows(filter: { staffId?: string }) {
-  const db = requireDatabase();
-  const rows = filter.staffId
-    ? await db`select id, first_name, last_name, job_title, photo_url, email, phone from staff where id = ${filter.staffId} and active = true`
-    : await db`select id, first_name, last_name, job_title, photo_url, email, phone from staff where active = true order by first_name`;
-  return rows.map((row) => ({
-    id: String(row.id),
-    firstName: String(row.first_name),
-    lastName: String(row.last_name),
-    title: String(row.job_title),
-    photo: String(row.photo_url ?? ""),
-    email: String(row.email ?? ""),
-    phone: String(row.phone ?? ""),
-  }));
-}
-
 function calculateMetrics(appointments: InternalAppointment[], transactions: Record<string, unknown>[]): DashboardMetrics {
   const revenue = transactions.reduce((sum, transaction) => sum + Number(transaction.amount), 0);
   const tips = transactions.reduce((sum, transaction) => sum + Number(transaction.tip), 0);
@@ -354,37 +246,6 @@ function calculateMetrics(appointments: InternalAppointment[], transactions: Rec
     averageTicket: transactions.length ? revenue / transactions.length : 0,
     cancelled: appointments.filter((appointment) => appointment.status === "cancelled").length,
     noShow: appointments.filter((appointment) => appointment.status === "no_show").length,
-  };
-}
-
-function mapInternalAppointment(row: Record<string, unknown>): InternalAppointment {
-  const start = new Date(row.start_at as Date);
-  const end = new Date(row.end_at as Date);
-  const startParts = brusselsParts(start);
-  const endParts = brusselsParts(end);
-  return {
-    id: String(row.appointment_id),
-    appointmentId: String(row.appointment_id),
-    reference: String(row.booking_reference),
-    customer: `${String(row.first_name)} ${String(row.last_name)}`,
-    customerId: String(row.customer_id_text),
-    customerFirstName: String(row.first_name),
-    customerLastName: String(row.last_name),
-    email: String(row.email),
-    phone: String(row.phone),
-    serviceId: String(row.service_id),
-    serviceName: String(row.service_name),
-    staffId: String(row.staff_id),
-    staffFirstName: String(row.staff_first_name),
-    staffLastName: String(row.staff_last_name),
-    date: startParts.date,
-    start: startParts.time,
-    end: endParts.time,
-    duration: Number(row.duration),
-    price: Number(row.price),
-    status: row.status as Appointment["status"],
-    notes: row.notes ? String(row.notes) : undefined,
-    createdAt: row.created_at ? new Date(row.created_at as Date).toISOString() : undefined,
   };
 }
 

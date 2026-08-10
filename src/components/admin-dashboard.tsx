@@ -7,14 +7,17 @@ import type { AdminDashboardData } from "@/lib/internal-db";
 
 type AdminAppointment = AdminDashboardData["appointments"][number];
 
-export function AdminDashboard({ data }: { data: AdminDashboardData }) {
+export function AdminDashboard({ data, initialSection }: { data: AdminDashboardData; initialSection?: string }) {
+  void initialSection;
   const router = useRouter();
   const [expenseMessage, setExpenseMessage] = useState("");
+  const [expenseBusy, setExpenseBusy] = useState(false);
   const upcoming = useMemo(() => data.appointments.filter((item) => ["pending", "confirmed"].includes(item.status)).slice(0, 8), [data.appointments]);
   const expenseTotal = data.expenses.reduce((sum, item) => sum + Number(item.amount), 0);
 
   async function addExpense(formData: FormData) {
     setExpenseMessage("");
+    setExpenseBusy(true);
     const response = await fetch("/api/admin/expenses", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -26,8 +29,10 @@ export function AdminDashboard({ data }: { data: AdminDashboardData }) {
         expenseDate: formData.get("expenseDate"),
       }),
     });
+    const payload = await response.json().catch(() => null);
+    setExpenseBusy(false);
     if (!response.ok) {
-      setExpenseMessage("Expense could not be saved.");
+      setExpenseMessage(payload?.error ?? "Expense could not be saved.");
       return;
     }
     setExpenseMessage("Expense saved.");
@@ -105,7 +110,7 @@ export function AdminDashboard({ data }: { data: AdminDashboardData }) {
                 <input name="amount" type="number" step="0.01" defaultValue={100} className="w-full rounded-xl border border-black/10 px-3 py-3 text-sm" />
                 <input name="expenseDate" type="date" defaultValue={new Date().toISOString().slice(0, 10)} className="w-full rounded-xl border border-black/10 px-3 py-3 text-sm" />
               </div>
-              <button className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#173d35] px-4 py-3 font-bold text-white"><Plus size={17} /> Save expense</button>
+              <button disabled={expenseBusy} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-[#173d35] px-4 py-3 font-bold text-white disabled:cursor-wait disabled:bg-[#6b7772]"><Plus size={17} /> {expenseBusy ? "Saving..." : "Save expense"}</button>
             </form>
             {expenseMessage ? <p className="mt-3 rounded-xl bg-[#eef4ef] px-4 py-3 text-sm font-semibold">{expenseMessage}</p> : null}
             <div className="mt-5 space-y-2">

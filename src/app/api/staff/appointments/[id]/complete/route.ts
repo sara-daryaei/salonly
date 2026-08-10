@@ -1,15 +1,18 @@
-import { NextResponse } from "next/server";
 import { getInternalSession } from "@/lib/internal-auth";
 import { completeAppointment, ForbiddenError, InvalidTransitionError, validateInternalSession, ValidationError } from "@/lib/internal-db";
+import { apiError, apiOk } from "@/lib/api-response";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
-  const session = await validateInternalSession(await getInternalSession(), { roles: ["staff"], requireStaff: true });
+  const rawSession = await getInternalSession();
+  if (!rawSession) return apiError("Authentication required.", 401);
+  const session = await validateInternalSession(rawSession, { roles: ["staff"], requireStaff: true });
   if (!session || !session.staffId) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return apiError("Forbidden.", 403);
   }
 
   const { id } = await context.params;
-  const body = await request.json();
+  const body = await request.json().catch(() => null);
+  if (!body || typeof body !== "object") return apiError("Request body must be valid JSON.", 400);
   try {
     await completeAppointment({
       appointmentId: id,
@@ -22,11 +25,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       note: String(body.note ?? ""),
     });
   } catch (error) {
-    if (error instanceof ValidationError) return NextResponse.json({ error: error.message }, { status: 400 });
-    if (error instanceof ForbiddenError) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    if (error instanceof InvalidTransitionError) return NextResponse.json({ error: error.message }, { status: 409 });
-    throw error;
+    if (error instanceof ValidationError) return apiError(error.message, 400);
+    if (error instanceof ForbiddenError) return apiError("Forbidden.", 403);
+    if (error instanceof InvalidTransitionError) return apiError(error.message, 409);
+    console.error(error);
+    return apiError("Unexpected server error.", 500);
   }
 
-  return NextResponse.json({ ok: true });
+  return apiOk();
 }

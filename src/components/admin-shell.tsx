@@ -1,18 +1,20 @@
 import Link from "next/link";
-import { Banknote, CalendarDays, LayoutDashboard, LogOut, ReceiptText, Scissors, Settings, Users } from "lucide-react";
+import { Banknote, BarChart3, CalendarDays, LayoutDashboard, LogOut, Package, ReceiptText, Scissors, Settings, Users } from "lucide-react";
 import type { InternalSession } from "@/lib/internal-auth";
 
 export function AdminShell({ children, session }: { children: React.ReactNode; session: InternalSession }) {
   const nav = [
     ["Overview", "/admin", LayoutDashboard],
-    ["Calendar", "/admin#calendar", CalendarDays],
-    ["Appointments", "/admin#appointments", CalendarDays],
-    ["Staff", "/admin#staff", Users],
-    ["Payments", "/admin#payments", Banknote],
-    ["Expenses", "/admin#expenses", ReceiptText],
-    ["Customers", "/admin#customers", Users],
-    ["Services", "/admin#services", Scissors],
-    ["Settings", "/admin#settings", Settings],
+    ["Calendar", "/admin/calendar", CalendarDays],
+    ["Appointments", "/admin/appointments", CalendarDays],
+    ["Customers", "/admin/customers", Users],
+    ["Staff", "/admin/staff", Users],
+    ["Services", "/admin/services", Scissors],
+    ["Products", "/admin/products", Package],
+    ["Payments", "/admin/payments", Banknote],
+    ["Expenses", "/admin/expenses", ReceiptText],
+    ["Reports", "/admin/reports", BarChart3],
+    ["Settings", "/admin/settings", Settings],
   ];
 
   return (

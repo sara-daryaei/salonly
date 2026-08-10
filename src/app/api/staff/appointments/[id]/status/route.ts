@@ -1,17 +1,20 @@
-import { NextResponse } from "next/server";
 import { getInternalSession } from "@/lib/internal-auth";
 import { ForbiddenError, InvalidTransitionError, markAppointmentStatus, validateInternalSession } from "@/lib/internal-db";
+import { apiError, apiOk } from "@/lib/api-response";
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
-  const session = await validateInternalSession(await getInternalSession(), { roles: ["staff"], requireStaff: true });
+  const rawSession = await getInternalSession();
+  if (!rawSession) return apiError("Authentication required.", 401);
+  const session = await validateInternalSession(rawSession, { roles: ["staff"], requireStaff: true });
   if (!session || !session.staffId) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+    return apiError("Forbidden.", 403);
   }
 
   const { id } = await context.params;
-  const body = await request.json();
+  const body = await request.json().catch(() => null);
+  if (!body || typeof body !== "object") return apiError("Request body must be valid JSON.", 400);
   if (body.status !== "cancelled" && body.status !== "no_show") {
-    return NextResponse.json({ error: "Unsupported appointment status." }, { status: 400 });
+    return apiError("Unsupported appointment status.", 400);
   }
   const status = body.status;
   try {
@@ -22,10 +25,11 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       status,
     });
   } catch (error) {
-    if (error instanceof ForbiddenError) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
-    if (error instanceof InvalidTransitionError) return NextResponse.json({ error: error.message }, { status: 409 });
-    throw error;
+    if (error instanceof ForbiddenError) return apiError("Forbidden.", 403);
+    if (error instanceof InvalidTransitionError) return apiError(error.message, 409);
+    console.error(error);
+    return apiError("Unexpected server error.", 500);
   }
 
-  return NextResponse.json({ ok: true });
+  return apiOk();
 }
