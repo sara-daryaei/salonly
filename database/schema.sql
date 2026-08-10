@@ -66,6 +66,25 @@ create table if not exists staff (
   active boolean not null default true
 );
 
+do $$ begin
+  create type internal_role as enum ('staff', 'manager', 'admin');
+exception when duplicate_object then null;
+end $$;
+
+create table if not exists profiles (
+  id uuid primary key default gen_random_uuid(),
+  auth_user_id text,
+  first_name text not null,
+  last_name text not null,
+  email text unique not null,
+  phone text,
+  role internal_role not null,
+  staff_id text references staff(id),
+  password_hash text not null,
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists staff_services (
   staff_id text not null references staff(id) on delete cascade,
   service_id text not null references services(id) on delete cascade,
@@ -116,6 +135,83 @@ create table if not exists appointments (
   notes text,
   created_at timestamptz not null default now(),
   check (end_at > start_at)
+);
+
+alter table appointments add column if not exists discount numeric not null default 0;
+
+create table if not exists transactions (
+  id uuid primary key default gen_random_uuid(),
+  appointment_id uuid references appointments(id),
+  customer_id uuid references customers(id),
+  staff_id text references staff(id),
+  amount numeric not null default 0,
+  discount numeric not null default 0,
+  tip numeric not null default 0,
+  payment_method text not null,
+  payment_status text not null default 'paid',
+  transaction_type text not null default 'service',
+  created_at timestamptz not null default now()
+);
+
+create table if not exists products (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  sku text unique,
+  cost_price numeric not null default 0,
+  sale_price numeric not null default 0,
+  stock_quantity integer not null default 0,
+  active boolean not null default true
+);
+
+create table if not exists product_sales (
+  id uuid primary key default gen_random_uuid(),
+  product_id uuid references products(id),
+  staff_id text references staff(id),
+  customer_id uuid references customers(id),
+  appointment_id uuid references appointments(id),
+  quantity integer not null,
+  unit_price numeric not null,
+  total_price numeric not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists expenses (
+  id uuid primary key default gen_random_uuid(),
+  category text not null,
+  description text not null,
+  amount numeric not null,
+  expense_date date not null,
+  supplier text,
+  created_by uuid references profiles(id),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists staff_work_logs (
+  id uuid primary key default gen_random_uuid(),
+  staff_id text references staff(id),
+  work_date date not null,
+  clock_in timestamptz,
+  clock_out timestamptz,
+  break_minutes integer not null default 0,
+  notes text
+);
+
+create table if not exists customer_notes (
+  id uuid primary key default gen_random_uuid(),
+  customer_id uuid references customers(id),
+  staff_id text references staff(id),
+  note text not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists audit_logs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references profiles(id),
+  action text not null,
+  entity_type text not null,
+  entity_id text,
+  metadata jsonb not null default '{}',
+  created_at timestamptz not null default now()
 );
 
 do $$ begin

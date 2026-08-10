@@ -36,6 +36,9 @@ export function PublicHeader({ locale = "en" }: { locale?: Locale }) {
           <Suspense fallback={<span className="hidden h-9 w-[94px] rounded-full border border-[#34251c]/15 sm:block" />}>
             <LanguageSwitcher locale={locale} />
           </Suspense>
+          <Link href="/login" className="rounded-full border border-[#34251c]/15 bg-[#fffaf4] px-3 py-2 text-sm font-semibold text-[#2f2118] hover:border-[#2f2118]/40">
+            {copy.nav.login}
+          </Link>
           <Link href={localizedHref("/book", locale)} className="rounded-full bg-[#2f2118] px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-[#2f2118]/15">
             {copy.nav.book}
           </Link>

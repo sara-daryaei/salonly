@@ -1,14 +1,17 @@
 import Link from "next/link";
-import { CalendarDays, LayoutDashboard, Scissors, Settings, Star, Users } from "lucide-react";
+import { Banknote, CalendarDays, LayoutDashboard, LogOut, ReceiptText, Scissors, Settings, Users } from "lucide-react";
+import type { InternalSession } from "@/lib/internal-auth";
 
-export function AdminShell({ children }: { children: React.ReactNode }) {
+export function AdminShell({ children, session }: { children: React.ReactNode; session: InternalSession }) {
   const nav = [
     ["Overview", "/admin", LayoutDashboard],
     ["Calendar", "/admin#calendar", CalendarDays],
     ["Appointments", "/admin#appointments", CalendarDays],
+    ["Staff", "/admin#staff", Users],
+    ["Payments", "/admin#payments", Banknote],
+    ["Expenses", "/admin#expenses", ReceiptText],
     ["Customers", "/admin#customers", Users],
     ["Services", "/admin#services", Scissors],
-    ["Reviews", "/admin#reviews", Star],
     ["Settings", "/admin#settings", Settings],
   ];
 
@@ -18,7 +21,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
         <aside className="border-r border-black/10 bg-white p-5">
           <Link href="/" className="flex items-center gap-3">
             <span className="grid h-10 w-10 place-items-center rounded-xl bg-[#173d35] text-white"><Scissors size={18} /></span>
-            <span className="font-semibold">Maison Admin</span>
+            <span><span className="block font-semibold">Maison Admin</span><span className="text-xs text-[#52605b]">{session.name}</span></span>
           </Link>
           <nav className="mt-8 space-y-1">
             {nav.map(([label, href, Icon]) => (
@@ -27,6 +30,11 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
               </Link>
             ))}
           </nav>
+          <form action="/api/internal/logout" method="post" className="mt-8">
+            <button className="flex w-full items-center gap-3 rounded-xl border border-black/10 px-3 py-3 text-sm font-semibold text-[#52605b] hover:bg-[#eef4ef]">
+              <LogOut size={17} /> Logout
+            </button>
+          </form>
         </aside>
         <section>{children}</section>
       </div>
