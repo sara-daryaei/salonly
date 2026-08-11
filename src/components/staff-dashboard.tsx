@@ -89,6 +89,7 @@ function AppointmentPanel({ appointment, products, onCleared }: { appointment: S
   const [error, setError] = useState("");
   const [productId, setProductId] = useState("");
   const [quantity, setQuantity] = useState(1);
+  const [productPaymentMethod, setProductPaymentMethod] = useState("card");
 
   if (!appointment) {
     return <section className="rounded-3xl border border-black/10 bg-white p-5 shadow-sm">Select an appointment.</section>;
@@ -163,7 +164,7 @@ function AppointmentPanel({ appointment, products, onCleared }: { appointment: S
   }
 
   async function sellProduct() {
-    const ok = await postAction("product-sales", { productId, quantity }, "Product sale recorded.");
+    const ok = await postAction("product-sales", { productId, quantity, paymentMethod: productPaymentMethod }, "Product sale recorded.");
     if (ok) {
       setProductId("");
       setQuantity(1);
@@ -204,6 +205,11 @@ function AppointmentPanel({ appointment, products, onCleared }: { appointment: S
               </select>
             </label>
             <label className="text-xs font-bold">Quantity<input value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} type="number" min={1} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm" /></label>
+            <label className="text-xs font-bold">Product payment method
+              <select value={productPaymentMethod} onChange={(event) => setProductPaymentMethod(event.target.value)} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm">
+                {paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}
+              </select>
+            </label>
             <p className="text-xs text-[#64736d]">Selected product: {selectedProduct ? `${String(selectedProduct.name)} · stock ${String(selectedProduct.stock_quantity)}` : "None"}</p>
           </div>
         ) : null}

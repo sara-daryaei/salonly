@@ -17,6 +17,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       actorProfileId: session.profileId,
       productId: String("productId" in body ? body.productId : ""),
       quantity: Number("quantity" in body ? body.quantity : 0),
+      paymentMethod: String("paymentMethod" in body ? body.paymentMethod : ""),
     });
     return apiOk();
   } catch (error) {

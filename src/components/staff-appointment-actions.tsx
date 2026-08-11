@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, PlayCircle, XCircle } from "lucide-react";
 import type { InternalAppointmentRecord } from "@/lib/internal/appointments";
@@ -21,7 +21,13 @@ export function StaffAppointmentActions({
   const [busy, setBusy] = useState(false);
   const [productId, setProductId] = useState("");
   const [quantity, setQuantity] = useState(1);
+  const [nextServiceId, setNextServiceId] = useState(String(appointment.serviceId));
+  const [nextDate, setNextDate] = useState("");
+  const [nextSlots, setNextSlots] = useState<string[]>([]);
+  const [slotsLoading, setSlotsLoading] = useState(false);
+  const [slotsError, setSlotsError] = useState("");
   const terminal = ["completed", "cancelled", "no_show"].includes(appointment.status);
+  const canScheduleNext = ["confirmed", "in_progress", "completed", "no_show"].includes(appointment.status);
   const canStart = canTransitionAppointment(appointment.status, "in_progress");
   const canComplete = canTransitionAppointment(appointment.status, "completed");
   const canCancel = canTransitionAppointment(appointment.status, "cancelled");
@@ -74,6 +80,34 @@ export function StaffAppointmentActions({
     }, "Next appointment scheduled.");
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!nextServiceId || !nextDate) return;
+    Promise.resolve()
+      .then(() => {
+        if (cancelled) return;
+        setNextSlots([]);
+        setSlotsError("");
+        setSlotsLoading(true);
+      })
+      .then(() => fetch(`/api/availability/times?serviceId=${encodeURIComponent(nextServiceId)}&staffId=${encodeURIComponent(appointment.staffId)}&date=${encodeURIComponent(nextDate)}`, {
+        cache: "no-store",
+      }))
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("Could not load available times.")))
+      .then((payload) => {
+        if (!cancelled) setNextSlots(Array.isArray(payload.slots) ? payload.slots.map((slot: { time: string }) => slot.time) : []);
+      })
+      .catch((err) => {
+        if (!cancelled) setSlotsError(err instanceof Error ? err.message : "Could not load available times.");
+      })
+      .finally(() => {
+        if (!cancelled) setSlotsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [appointment.staffId, nextDate, nextServiceId]);
+
   return (
     <div className="space-y-4">
       {!terminal ? (
@@ -112,18 +146,23 @@ export function StaffAppointmentActions({
         </form>
       ) : null}
 
-      {!terminal && services.length ? (
+      {canScheduleNext && services.length ? (
         <form action={scheduleNext} className="space-y-2 rounded-xl border border-black/10 p-3">
           <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#6b7772]">Schedule next appointment</p>
           <div className="grid gap-2 md:grid-cols-3">
-            <select name="serviceId" defaultValue={appointment.serviceId} className={inputClass}>
+            <select name="serviceId" value={nextServiceId} onChange={(event) => setNextServiceId(event.target.value)} className={inputClass}>
               {services.map((service) => <option key={String(service.id)} value={String(service.id)}>{String(service.name)}</option>)}
             </select>
-            <input name="date" type="date" required className={inputClass} />
-            <input name="startTime" type="time" required className={inputClass} />
+            <input name="date" type="date" required value={nextDate} onChange={(event) => setNextDate(event.target.value)} className={inputClass} />
+            <select name="startTime" required disabled={!nextDate || slotsLoading || !nextSlots.length} className={inputClass}>
+              <option value="">{slotsLoading ? "Loading..." : "Select time"}</option>
+              {nextSlots.map((slot) => <option key={slot} value={slot}>{slot}</option>)}
+            </select>
           </div>
+          {nextDate && !slotsLoading && !nextSlots.length ? <p className="text-sm font-semibold text-[#64736d]">No available times for this date.</p> : null}
+          {slotsError ? <p className="text-sm font-semibold text-[#9c3d28]">{slotsError}</p> : null}
           <textarea name="notes" placeholder="Next appointment note" className={inputClass} />
-          <button disabled={busy} className={buttonClass}>Schedule next</button>
+          <button disabled={busy || slotsLoading || !nextSlots.length} className={buttonClass}>Schedule next</button>
         </form>
       ) : null}
 

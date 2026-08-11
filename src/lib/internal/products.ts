@@ -27,7 +27,7 @@ export async function listProductSales(filter: { staffId?: string; dateFrom?: st
   const db = requireDatabase();
   return db`
     select ps.id::text, ps.product_id::text, p.name, ps.staff_id, ps.customer_id::text, ps.appointment_id::text,
-      ps.quantity, ps.unit_price, ps.total_price, ps.created_at::text
+      ps.quantity, ps.unit_price, ps.total_price, ps.payment_method, ps.created_at::text
     from product_sales ps
     join products p on p.id = ps.product_id
     where (${filter.staffId ?? null}::text is null or ps.staff_id = ${filter.staffId ?? null})

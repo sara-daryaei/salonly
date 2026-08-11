@@ -1,4 +1,5 @@
 import { hasDatabase, requireDatabase } from "@/lib/db";
+import type { TransactionSql } from "postgres";
 import { brusselsParts } from "@/lib/time";
 import { blockingAppointmentStatuses, blocksAppointmentAvailability } from "@/lib/security-rules";
 import type { Appointment, Service, Staff } from "@/lib/salon-data";
@@ -73,11 +74,12 @@ export async function createDatabaseAppointment(input: {
   const db = requireDatabase();
   try {
     const rows = await db.begin(async (tx) => {
-      const [customer] = await tx`
-        insert into customers (first_name, last_name, email, phone)
-        values (${input.firstName}, ${input.lastName}, ${input.email}, ${input.phone})
-        returning id
-      `;
+      const customer = await findOrCreateCustomer(tx, {
+        firstName: input.firstName,
+        lastName: input.lastName,
+        email: input.email,
+        phone: input.phone,
+      });
       return tx`
         insert into appointments (
           booking_reference,
@@ -183,6 +185,71 @@ export class AppointmentConflictError extends Error {
 export function brusselsDateTimeToUtc(date: string, time: string) {
   const offset = getBrusselsOffset(date, time);
   return new Date(`${date}T${time}:00${offset}`);
+}
+
+async function findOrCreateCustomer(
+  tx: TransactionSql<Record<string, never>>,
+  input: { firstName: string; lastName: string; email: string; phone: string },
+) {
+  const normalizedEmail = normalizeEmail(input.email);
+  const normalizedPhone = normalizePhone(input.phone);
+  const emailMatches = normalizedEmail
+    ? await tx`
+      select id, first_name, last_name, email, phone
+      from customers
+      where lower(trim(email)) = ${normalizedEmail}
+      order by created_at asc
+      limit 2
+    `
+    : [];
+  if (emailMatches.length === 1) {
+    const [customer] = emailMatches;
+    await tx`
+      update customers
+      set first_name = coalesce(nullif(${input.firstName.trim()}, ''), first_name),
+        last_name = coalesce(nullif(${input.lastName.trim()}, ''), last_name),
+        email = ${normalizedEmail}
+      where id = ${customer.id}
+    `;
+    return customer;
+  }
+
+  const phoneMatches = normalizedPhone
+    ? await tx`
+      select id, first_name, last_name, email, phone
+      from customers
+      where regexp_replace(phone, '[^0-9+]', '', 'g') = ${normalizedPhone}
+      order by created_at asc
+      limit 2
+    `
+    : [];
+  if (!emailMatches.length && phoneMatches.length === 1) {
+    const [customer] = phoneMatches;
+    await tx`
+      update customers
+      set first_name = coalesce(nullif(${input.firstName.trim()}, ''), first_name),
+        last_name = coalesce(nullif(${input.lastName.trim()}, ''), last_name),
+        email = coalesce(nullif(${normalizedEmail}, ''), email),
+        phone = coalesce(nullif(${input.phone.trim()}, ''), phone)
+      where id = ${customer.id}
+    `;
+    return customer;
+  }
+
+  const rows = await tx`
+    insert into customers (first_name, last_name, email, phone)
+    values (${input.firstName.trim()}, ${input.lastName.trim()}, ${normalizedEmail || input.email.trim()}, ${input.phone.trim()})
+    returning id
+  `;
+  return rows[0];
+}
+
+function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
+}
+
+function normalizePhone(phone: string) {
+  return phone.trim().replace(/[^\d+]/g, "");
 }
 
 function isExclusionViolation(error: unknown) {

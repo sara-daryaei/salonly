@@ -104,6 +104,36 @@ async function runChecks() {
   assert("maximum booking period works", slotsBeyondMaximum.length === 0, slotsBeyondMaximum.map((slot) => slot.time).join(", "));
   await sql`update salon_settings set minimum_booking_notice_minutes = 120, maximum_booking_period_days = 90, appointment_slot_interval_minutes = 30 where id = 'maison-elegance'`;
 
+  const repeatOne = await request("/api/bookings", {
+    method: "POST",
+    json: { serviceId, staffId, date: settingsDate, startTime: "10:30", firstName: "Repeat", lastName: "Client", email: "customer@example.com", phone: "+32 470 44 55 66" },
+  });
+  const repeatTwo = await request("/api/bookings", {
+    method: "POST",
+    json: { serviceId, staffId, date: settingsDate, startTime: "16:00", firstName: "Repeat", lastName: "Client", email: "Customer@Example.com", phone: "+32 470 44 55 66" },
+  });
+  const repeatRows = await sql`
+    select c.id::text as customer_id, count(a.id)::int as appointments
+    from customers c
+    join appointments a on a.customer_id = c.id
+    where lower(trim(c.email)) = 'customer@example.com'
+    group by c.id
+  `;
+  assert("repeat public booking reuses customer", repeatOne.status === 201 && repeatTwo.status === 201 && repeatRows.length === 1 && Number(repeatRows[0].appointments) === 2, JSON.stringify(repeatRows));
+  const repeatHistory = await sql`select count(*)::int as count from appointments where customer_id = ${repeatRows[0]?.customer_id}`;
+  assert("customer history contains both appointments", Number(repeatHistory[0].count) === 2, `count=${repeatHistory[0].count}`);
+  const returningRows = await sql`
+    select count(*)::int as returning_customers
+    from (
+      select customer_id, count(*) as visits
+      from appointments
+      where start_at < ((${settingsDate}::date + interval '1 day') at time zone 'Europe/Brussels')
+      group by customer_id
+    ) visits
+    where visits > 1
+  `;
+  assert("returning customer analytics works", Number(returningRows[0].returning_customers) >= 1, `returning=${returningRows[0].returning_customers}`);
+
   const note = await request(`/api/staff/appointments/${appointment.id}/notes`, { method: "POST", jar: staffJar, json: { note: "E2E customer prefers quiet appointment.", customerNote: true } });
   const noteRows = await sql`select count(*)::int as count from customer_notes`;
   assert("6. Staff can add customer notes", note.status === 200 && Number(noteRows[0].count) === 1, `status=${note.status} notes=${noteRows[0].count}`);
@@ -140,14 +170,31 @@ async function runChecks() {
     json: { serviceId, staffId, date: targetDate, startTime: "10:30", firstName: "Product", lastName: "Client", email: "product@example.com", phone: "+32 470 99 88 77" },
   });
   const productAppointment = productBooking.body.appointment;
-  const standaloneSale = await request(`/api/staff/appointments/${productAppointment.id}/product-sales`, { method: "POST", jar: staffJar, json: { productId, quantity: 2 } });
+  const standaloneSale = await request(`/api/staff/appointments/${productAppointment.id}/product-sales`, { method: "POST", jar: staffJar, json: { productId, quantity: 1, paymentMethod: "bancontact" } });
   const completeAfterSale = await request(`/api/staff/appointments/${productAppointment.id}/complete`, { method: "POST", jar: staffJar, json: { grossAmount: 55, discount: 0, tip: 0, paymentMethod: "card", note: "", products: [] } });
   const productAfter = await sql`select stock_quantity from products where id = ${productId}`;
-  const saleRows = await sql`select quantity, total_price from product_sales where appointment_id = ${productAppointment.id}`;
+  const saleRows = await sql`select quantity, total_price, payment_method from product_sales where appointment_id = ${productAppointment.id}`;
   const reportsCsv = await request(`/api/admin/reports?period=custom&from=${financialDate}&to=${financialDate}`, { jar: adminJar, raw: true });
-  assert("11. Product sale updates stock and reporting", standaloneSale.status === 200 && completeAfterSale.status === 200 && Number(productAfter[0].stock_quantity) === Number(productBefore[0].stock_quantity) - 2 && saleRows.length === 1 && reportsCsv.text.includes("E2E Shampoo"), `stock=${productAfter[0].stock_quantity} sales=${saleRows.length}`);
+  assert("11. Product sale updates stock and reporting", standaloneSale.status === 200 && completeAfterSale.status === 200 && Number(productAfter[0].stock_quantity) === Number(productBefore[0].stock_quantity) - 1 && saleRows.length === 1 && reportsCsv.text.includes("E2E Shampoo"), `stock=${productAfter[0].stock_quantity} sales=${saleRows.length}`);
+  assert("product payment method is recorded", String(saleRows[0]?.payment_method) === "bancontact", JSON.stringify(saleRows[0]));
   const totalServiceRevenueRows = await sql`select coalesce(sum(amount), 0)::numeric as revenue from transactions where payment_status = 'paid' and transaction_type = 'service'`;
   assert("11a. Product revenue does not inflate service transaction revenue", Number(totalServiceRevenueRows[0].revenue) === 105, `revenue=${totalServiceRevenueRows[0].revenue}`);
+  const methodRows = await sql`
+    with paid_methods as (
+      select payment_method, amount
+      from transactions
+      where payment_status = 'paid' and transaction_type = 'service'
+      union all
+      select payment_method, total_price as amount
+      from product_sales
+    )
+    select payment_method, coalesce(sum(amount), 0)::numeric as total
+    from paid_methods
+    group by payment_method
+  `;
+  const methodTotals = Object.fromEntries(methodRows.map((row) => [String(row.payment_method), Number(row.total)]));
+  assert("payment-method report reconciles service + products", methodTotals.card === 105 && methodTotals.bancontact === 20, JSON.stringify(methodTotals));
+  assert("no financial double counting", Number(totalServiceRevenueRows[0].revenue) === 105 && Number(saleRows[0].total_price) === 20, `service=${totalServiceRevenueRows[0].revenue} product=${saleRows[0].total_price}`);
 
   const [customerRow] = await sql`select customer_id::text from appointments where id = ${appointment.id}`;
   const next = await request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: staffJar, json: { serviceId, date: targetDate, startTime: "15:30", notes: "E2E next appointment." } });
@@ -155,6 +202,10 @@ async function runChecks() {
   const staffAppointmentsAfterNext = await request("/staff/appointments", { jar: staffJar, raw: true });
   const adminAppointmentsAfterNext = await request("/admin/appointments?q=E2E", { jar: adminJar, raw: true });
   assert("11b. Schedule Next Appointment respects availability", next.status === 200 && !slotsAfterNext.some((slot) => slot.time === "15:30") && staffAppointmentsAfterNext.text.includes("15:30") && adminAppointmentsAfterNext.text.includes("15:30"), `next=${next.status}`);
+  const scheduleAfterCompleteSlots = await getSlots(serviceId, staffId, settingsDate);
+  const nextAfterComplete = await request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: staffJar, json: { serviceId, date: settingsDate, startTime: "09:00", notes: "E2E next after completed." } });
+  assert("Schedule Next is available after completed appointment", nextAfterComplete.status === 200, `status=${nextAfterComplete.status}`);
+  assert("Schedule Next displays only real available slots", scheduleAfterCompleteSlots.some((slot) => slot.time === "09:00") && !scheduleAfterCompleteSlots.some((slot) => slot.time === "10:30"), scheduleAfterCompleteSlots.map((slot) => slot.time).join(", "));
 
   const collisionA = new CookieJar();
   collisionA.cookies = new Map(staffJar.cookies);
@@ -166,9 +217,17 @@ async function runChecks() {
   ]);
   assert("schedule-next collision returns 409", collisionResults.some((item) => item.status === 200) && collisionResults.some((item) => item.status === 409), collisionResults.map((item) => item.status).join(", "));
 
-  const expense = await request("/api/admin/expenses", { method: "POST", jar: adminJar, json: { category: "E2E", description: "E2E expense", supplier: "Verifier", amount: 100, expenseDate: financialDate } });
+  const expense = await request("/api/admin/expenses", { method: "POST", jar: adminJar, json: { category: "E2E", description: "E2E expense", supplier: "Verifier", amount: 30, expenseDate: financialDate } });
   const overviewAfterExpense = await request(`/admin?period=custom&from=${financialDate}&to=${financialDate}`, { jar: adminJar, raw: true });
-  assert("12. Expense updates financial result", expense.status === 200 && overviewAfterExpense.text.includes("EUR 100"), `expenseStatus=${expense.status}`);
+  assert("12. Expense updates financial result", expense.status === 200 && overviewAfterExpense.text.includes("EUR 30"), `expenseStatus=${expense.status}`);
+  const badInputs = await Promise.all([
+    request(`/api/admin/services/${serviceId}`, { method: "PATCH", jar: adminJar, json: { name: "", category: "Haircuts", description: "Bad", price: 55, duration: 60, imageUrl: "", active: true, staffIds: [staffId] } }),
+    request(`/api/admin/services/${serviceId}`, { method: "PATCH", jar: adminJar, json: { name: "Women's Haircut", category: "Haircuts", description: "Bad", price: 55, duration: 0, imageUrl: "", active: true, staffIds: [staffId] } }),
+    request(`/api/admin/staff/${staffId}/schedule`, { method: "PUT", jar: adminJar, json: { schedules: [{ day: 3, start: "17:00", end: "09:00", lunchStart: "", lunchEnd: "", active: true }] } }),
+    request(`/api/admin/staff/${staffId}/schedule`, { method: "PUT", jar: adminJar, json: { schedules: [{ day: 3, start: "09:00", end: "17:00", lunchStart: "08:00", lunchEnd: "08:30", active: true }] } }),
+    request("/api/admin/products", { method: "POST", jar: adminJar, json: { name: "Bad product", sku: "BAD-STOCK", costPrice: 1, salePrice: 2, stock: -1, active: true } }),
+  ]);
+  assert("management inputs return 400 for invalid business data", badInputs.every((item) => item.status === 400), badInputs.map((item) => item.status).join(", "));
 
   const second = await request("/api/bookings", {
     method: "POST",

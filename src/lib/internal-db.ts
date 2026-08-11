@@ -2,7 +2,7 @@ import { createSessionPayload, type InternalRole, type InternalSession } from "@
 import type { TransactionSql } from "postgres";
 import { requireDatabase } from "@/lib/db";
 import { verifyPassword } from "@/lib/password";
-import { canTransitionAppointment, validateExpenseInput, validatePaymentInput } from "@/lib/security-rules";
+import { canTransitionAppointment, paymentMethods, validateExpenseInput, validatePaymentInput, type PaymentMethod } from "@/lib/security-rules";
 import { brusselsParts, getTodayBrussels } from "@/lib/time";
 import { listAppointments, type InternalAppointmentRecord } from "@/lib/internal/appointments";
 import { listExpenses } from "@/lib/internal/expenses";
@@ -209,6 +209,7 @@ export async function completeAppointment(input: {
         customerId: String(appointment.customer_id),
         productId: product.productId,
         quantity: product.quantity,
+        paymentMethod: payment.paymentMethod,
       });
     }
     if (input.note) {
@@ -296,7 +297,8 @@ export async function addStaffAppointmentNote(input: { appointmentId: string; st
   });
 }
 
-export async function sellAppointmentProduct(input: { appointmentId: string; staffId: string; actorProfileId: string; productId: string; quantity: number }) {
+export async function sellAppointmentProduct(input: { appointmentId: string; staffId: string; actorProfileId: string; productId: string; quantity: number; paymentMethod: string }) {
+  const paymentMethod = validateProductPaymentMethod(input.paymentMethod);
   const db = requireDatabase();
   await db.begin(async (tx) => {
     const [appointment] = await tx`
@@ -312,6 +314,7 @@ export async function sellAppointmentProduct(input: { appointmentId: string; sta
       customerId: String(appointment.customer_id),
       productId: input.productId,
       quantity: input.quantity,
+      paymentMethod,
     });
     await tx`
       insert into audit_logs (user_id, action, entity_type, entity_id, metadata)
@@ -390,7 +393,7 @@ export async function createExpense(input: { actorProfileId: string; category: s
   return rows[0].id as string;
 }
 
-async function sellProductInTransaction(tx: TransactionSql<Record<string, never>>, input: { appointmentId: string; staffId: string; customerId: string; productId: string; quantity: number }) {
+async function sellProductInTransaction(tx: TransactionSql<Record<string, never>>, input: { appointmentId: string; staffId: string; customerId: string; productId: string; quantity: number; paymentMethod: PaymentMethod }) {
   const quantity = Number(input.quantity);
   if (!Number.isInteger(quantity) || quantity <= 0) throw new ValidationError("Product quantity must be a positive whole number.");
   const [product] = await tx`
@@ -405,9 +408,15 @@ async function sellProductInTransaction(tx: TransactionSql<Record<string, never>
   const unitPrice = Number(product.sale_price);
   const totalPrice = unitPrice * quantity;
   await tx`
-    insert into product_sales (product_id, staff_id, customer_id, appointment_id, quantity, unit_price, total_price)
-    values (${input.productId}, ${input.staffId}, ${input.customerId}, ${input.appointmentId}, ${quantity}, ${unitPrice}, ${totalPrice})
+    insert into product_sales (product_id, staff_id, customer_id, appointment_id, quantity, unit_price, total_price, payment_method)
+    values (${input.productId}, ${input.staffId}, ${input.customerId}, ${input.appointmentId}, ${quantity}, ${unitPrice}, ${totalPrice}, ${input.paymentMethod})
   `;
+}
+
+function validateProductPaymentMethod(input: string): PaymentMethod {
+  const method = input.trim();
+  if (!paymentMethods.includes(method as PaymentMethod)) throw new ValidationError("Unsupported payment method.");
+  return method as PaymentMethod;
 }
 
 function calculateMetrics(appointments: InternalAppointment[], transactions: Record<string, unknown>[]): DashboardMetrics {

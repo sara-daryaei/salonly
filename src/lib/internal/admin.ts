@@ -245,20 +245,39 @@ export async function listAdminServices() {
 export async function listAdminPayments(filter: { from?: string; to?: string; staffId?: string; method?: string } = {}) {
   const db = requireDatabase();
   return db`
-    select t.id::text, t.created_at::text, t.amount, t.discount, t.tip, t.payment_method, t.payment_status, t.transaction_type,
-      a.id::text as appointment_id, a.booking_reference, c.first_name || ' ' || c.last_name as customer,
-      st.first_name || ' ' || st.last_name as staff, s.name as service,
-      coalesce((select sum(ps.total_price) from product_sales ps where ps.appointment_id = a.id), 0)::numeric as products
-    from transactions t
-    left join appointments a on a.id = t.appointment_id
-    left join customers c on c.id = t.customer_id
-    left join staff st on st.id = t.staff_id
-    left join services s on s.id = a.service_id
-    where (${filter.from ?? null}::text is null or t.created_at >= (${filter.from ?? null}::date at time zone 'Europe/Brussels'))
-      and (${filter.to ?? null}::text is null or t.created_at < (((${filter.to ?? null}::date + interval '1 day') at time zone 'Europe/Brussels')))
-      and (${filter.staffId ?? null}::text is null or t.staff_id = ${filter.staffId ?? null})
-      and (${filter.method ?? null}::text is null or t.payment_method = ${filter.method ?? null})
-    order by t.created_at desc
+    with service_payments as (
+      select t.id::text, t.created_at::text, t.amount, t.discount, t.tip, t.payment_method, t.payment_status, t.transaction_type,
+        a.id::text as appointment_id, a.booking_reference, c.first_name || ' ' || c.last_name as customer,
+        st.first_name || ' ' || st.last_name as staff, s.name as service, 0::numeric as products
+      from transactions t
+      left join appointments a on a.id = t.appointment_id
+      left join customers c on c.id = t.customer_id
+      left join staff st on st.id = t.staff_id
+      left join services s on s.id = a.service_id
+      where t.transaction_type = 'service'
+        and (${filter.from ?? null}::text is null or t.created_at >= (${filter.from ?? null}::date at time zone 'Europe/Brussels'))
+        and (${filter.to ?? null}::text is null or t.created_at < (((${filter.to ?? null}::date + interval '1 day') at time zone 'Europe/Brussels')))
+        and (${filter.staffId ?? null}::text is null or t.staff_id = ${filter.staffId ?? null})
+        and (${filter.method ?? null}::text is null or t.payment_method = ${filter.method ?? null})
+    ),
+    product_payments as (
+      select ps.id::text, ps.created_at::text, ps.total_price as amount, 0::numeric as discount, 0::numeric as tip, ps.payment_method, 'paid'::text as payment_status, 'product'::text as transaction_type,
+        a.id::text as appointment_id, a.booking_reference, c.first_name || ' ' || c.last_name as customer,
+        st.first_name || ' ' || st.last_name as staff, p.name as service, ps.total_price as products
+      from product_sales ps
+      join products p on p.id = ps.product_id
+      left join appointments a on a.id = ps.appointment_id
+      left join customers c on c.id = ps.customer_id
+      left join staff st on st.id = ps.staff_id
+      where (${filter.from ?? null}::text is null or ps.created_at >= (${filter.from ?? null}::date at time zone 'Europe/Brussels'))
+        and (${filter.to ?? null}::text is null or ps.created_at < (((${filter.to ?? null}::date + interval '1 day') at time zone 'Europe/Brussels')))
+        and (${filter.staffId ?? null}::text is null or ps.staff_id = ${filter.staffId ?? null})
+        and (${filter.method ?? null}::text is null or ps.payment_method = ${filter.method ?? null})
+    )
+    select * from service_payments
+    union all
+    select * from product_payments
+    order by created_at desc
   `;
 }
 
@@ -269,7 +288,25 @@ export async function listAdminReports(range: DateRange) {
   const [staffRevenue, serviceRevenue, methodRevenue, statusCounts, expenses, products, retention] = await Promise.all([
     db`select st.first_name || ' ' || st.last_name as label, coalesce(sum(t.amount),0)::numeric as value from staff st left join transactions t on t.staff_id = st.id and t.created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and t.created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) and t.payment_status = 'paid' and t.transaction_type = 'service' group by st.id order by value desc`,
     db`select s.name as label, coalesce(sum(t.amount),0)::numeric as value from services s left join appointments a on a.service_id = s.id left join transactions t on t.appointment_id = a.id and t.created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and t.created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) and t.payment_status = 'paid' and t.transaction_type = 'service' group by s.id order by value desc`,
-    db`select payment_method as label, coalesce(sum(amount),0)::numeric as value from transactions where created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) and payment_status = 'paid' group by payment_method order by value desc`,
+    db`
+      with paid_methods as (
+        select payment_method, amount
+        from transactions
+        where created_at >= (${fromSql}::date at time zone 'Europe/Brussels')
+          and created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels'))
+          and payment_status = 'paid'
+          and transaction_type = 'service'
+        union all
+        select payment_method, total_price as amount
+        from product_sales
+        where created_at >= (${fromSql}::date at time zone 'Europe/Brussels')
+          and created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels'))
+      )
+      select payment_method as label, coalesce(sum(amount),0)::numeric as value
+      from paid_methods
+      group by payment_method
+      order by value desc
+    `,
     db`select status::text as label, count(*)::int as value from appointments where start_at >= (${fromSql}::date at time zone 'Europe/Brussels') and start_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) group by status order by value desc`,
     db`select category as label, coalesce(sum(amount),0)::numeric as value from expenses where expense_date >= ${fromSql}::date and expense_date <= ${toSql}::date group by category order by value desc`,
     db`select p.name as label, coalesce(sum(ps.total_price),0)::numeric as value from products p left join product_sales ps on ps.product_id = p.id and ps.created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and ps.created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) group by p.id order by value desc`,
@@ -326,13 +363,15 @@ export async function updateAppointment(input: {
 
 export async function upsertService(actor: InternalSession, body: Record<string, unknown>, serviceId?: string) {
   const db = requireDatabase();
-  const id = serviceId || slug(String(body.name ?? ""));
+  const name = requiredText(body.name, "Service name");
+  const duration = positiveInteger(body.duration, "Service duration");
+  const id = serviceId || slug(name);
   const staffIds = array(body.staffIds);
   const active = Boolean(body.active);
   await db.begin(async (tx) => {
     await tx`
       insert into services (id, name, category, description, price, duration, image_url, active)
-      values (${id}, ${text(body.name)}, ${text(body.category)}, ${text(body.description)}, ${num(body.price)}, ${num(body.duration)}, ${text(body.imageUrl)}, ${active})
+      values (${id}, ${name}, ${text(body.category)}, ${text(body.description)}, ${num(body.price)}, ${duration}, ${text(body.imageUrl)}, ${active})
       on conflict (id) do update set name = excluded.name, category = excluded.category, description = excluded.description, price = excluded.price, duration = excluded.duration, image_url = excluded.image_url, active = excluded.active
     `;
     await tx`delete from staff_services where service_id = ${id}`;
@@ -345,15 +384,16 @@ export async function upsertService(actor: InternalSession, body: Record<string,
 
 export async function upsertProduct(actor: InternalSession, body: Record<string, unknown>, productId?: string) {
   const db = requireDatabase();
+  const stock = boundedInteger(body.stock, "Product stock", { min: 0 });
   const rows = productId
     ? await db`
-      update products set name = ${text(body.name)}, sku = ${nullable(body.sku)}, cost_price = ${num(body.costPrice)}, sale_price = ${num(body.salePrice)}, stock_quantity = ${int(body.stock)}, active = ${Boolean(body.active)}, updated_at = now()
+      update products set name = ${requiredText(body.name, "Product name")}, sku = ${nullable(body.sku)}, cost_price = ${num(body.costPrice)}, sale_price = ${num(body.salePrice)}, stock_quantity = ${stock}, active = ${Boolean(body.active)}, updated_at = now()
       where id = ${productId}
       returning id::text
     `
     : await db`
       insert into products (name, sku, cost_price, sale_price, stock_quantity, active, updated_at)
-      values (${text(body.name)}, ${nullable(body.sku)}, ${num(body.costPrice)}, ${num(body.salePrice)}, ${int(body.stock)}, ${Boolean(body.active)}, now())
+      values (${requiredText(body.name, "Product name")}, ${nullable(body.sku)}, ${num(body.costPrice)}, ${num(body.salePrice)}, ${stock}, ${Boolean(body.active)}, now())
       returning id::text
     `;
   await recordAuditLog({ userId: actor.profileId, action: productId ? "product_updated" : "product_created", entityType: "product", entityId: String(rows[0].id) });
@@ -398,9 +438,10 @@ export async function replaceStaffSchedule(actor: InternalSession, staffId: stri
     for (const row of schedules) {
       const active = Boolean(row.active);
       if (!active) continue;
+      const schedule = validateStaffSchedule(row);
       await tx`
         insert into staff_working_hours (staff_id, day_of_week, start_time, end_time, lunch_start, lunch_end, active)
-        values (${staffId}, ${int(row.day)}, ${text(row.start)}, ${text(row.end)}, ${nullable(row.lunchStart)}, ${nullable(row.lunchEnd)}, true)
+        values (${staffId}, ${schedule.day}, ${schedule.start}, ${schedule.end}, ${schedule.lunchStart}, ${schedule.lunchEnd}, true)
       `;
     }
     await tx`insert into audit_logs (user_id, action, entity_type, entity_id, metadata) values (${actor.profileId}, 'staff_schedule_updated', 'staff', ${staffId}, ${JSON.stringify({ rows: schedules.length })})`;
@@ -470,10 +511,11 @@ function validateSalonSettings(body: Record<string, unknown>) {
 
 export async function updateExpense(actor: InternalSession, id: string, body: Record<string, unknown>) {
   const db = requireDatabase();
+  const amount = positiveNumber(body.amount, "Expense amount");
   await db.begin(async (tx) => {
     const [before] = await tx`select to_jsonb(expenses.*) as data from expenses where id = ${id} for update`;
     if (!before) throw new ValidationError("Expense not found.");
-    await tx`update expenses set category = ${text(body.category)}, description = ${text(body.description)}, supplier = ${nullable(body.supplier)}, amount = ${num(body.amount)}, expense_date = ${text(body.expenseDate)}::date where id = ${id}`;
+    await tx`update expenses set category = ${text(body.category)}, description = ${text(body.description)}, supplier = ${nullable(body.supplier)}, amount = ${amount}, expense_date = ${text(body.expenseDate)}::date where id = ${id}`;
     const [after] = await tx`select to_jsonb(expenses.*) as data from expenses where id = ${id}`;
     await tx`insert into expense_audit (expense_id, changed_by, action, before_data, after_data) values (${id}, ${actor.profileId}, 'updated', ${before.data}, ${after.data})`;
     await tx`insert into audit_logs (user_id, action, entity_type, entity_id, metadata) values (${actor.profileId}, 'expense_updated', 'expense', ${id}, '{}'::jsonb)`;
@@ -583,9 +625,27 @@ function nullable(input: unknown) {
   return cleaned || null;
 }
 
+function requiredText(input: unknown, label: string) {
+  const cleaned = text(input);
+  if (!cleaned) throw new ValidationError(`${label} is required.`);
+  return cleaned;
+}
+
 function num(input: unknown) {
   const value = Number(input);
   if (!Number.isFinite(value) || value < 0) throw new ValidationError("Numeric value is invalid.");
+  return value;
+}
+
+function positiveNumber(input: unknown, label: string) {
+  const value = Number(input);
+  if (!Number.isFinite(value) || value <= 0) throw new ValidationError(`${label} must be greater than zero.`);
+  return value;
+}
+
+function positiveInteger(input: unknown, label: string) {
+  const value = Number(input);
+  if (!Number.isInteger(value) || value <= 0) throw new ValidationError(`${label} must be greater than zero.`);
   return value;
 }
 
@@ -606,10 +666,25 @@ function timeToMinutes(input: string) {
   return hours * 60 + minutes;
 }
 
-function int(input: unknown) {
-  const value = Number(input);
-  if (!Number.isInteger(value) || value < 0) throw new ValidationError("Integer value is invalid.");
-  return value;
+function validateStaffSchedule(row: Record<string, unknown>) {
+  const day = boundedInteger(row.day, "Working day", { min: 0, max: 6 });
+  const start = text(row.start);
+  const end = text(row.end);
+  if (!isValidTime(start) || !isValidTime(end)) throw new ValidationError("Working hours must use valid HH:mm times.");
+  const startMinutes = timeToMinutes(start);
+  const endMinutes = timeToMinutes(end);
+  if (endMinutes <= startMinutes) throw new ValidationError("Working hour end must be after start.");
+  const lunchStart = nullable(row.lunchStart);
+  const lunchEnd = nullable(row.lunchEnd);
+  if ((lunchStart && !lunchEnd) || (!lunchStart && lunchEnd)) throw new ValidationError("Lunch break must include both start and end.");
+  if (lunchStart && lunchEnd) {
+    if (!isValidTime(lunchStart) || !isValidTime(lunchEnd)) throw new ValidationError("Lunch break must use valid HH:mm times.");
+    const lunchStartMinutes = timeToMinutes(lunchStart);
+    const lunchEndMinutes = timeToMinutes(lunchEnd);
+    if (lunchEndMinutes <= lunchStartMinutes) throw new ValidationError("Lunch end must be after lunch start.");
+    if (lunchStartMinutes < startMinutes || lunchEndMinutes > endMinutes) throw new ValidationError("Lunch break must be inside working hours.");
+  }
+  return { day, start, end, lunchStart, lunchEnd };
 }
 
 function array(input: unknown) {

@@ -133,6 +133,12 @@ create table if not exists customers (
   created_at timestamptz not null default now()
 );
 
+create index if not exists customers_normalized_email_idx
+  on customers (lower(trim(email)));
+
+create index if not exists customers_normalized_phone_idx
+  on customers (regexp_replace(phone, '[^0-9+]', '', 'g'));
+
 create table if not exists appointments (
   id uuid primary key default gen_random_uuid(),
   booking_reference text unique not null,
@@ -185,6 +191,7 @@ create table if not exists product_sales (
   quantity integer not null,
   unit_price numeric not null,
   total_price numeric not null,
+  payment_method text not null default 'card',
   created_at timestamptz not null default now()
 );
 
