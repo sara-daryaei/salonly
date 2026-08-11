@@ -1,0 +1,413 @@
+import { readFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import postgres from "postgres";
+import bcrypt from "bcryptjs";
+
+const rootUrl = process.env.E2E_DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.DATABASE_URL;
+if (!rootUrl) {
+  console.error("E2E_DATABASE_URL, POSTGRES_URL or DATABASE_URL is required.");
+  process.exit(1);
+}
+
+const port = Number(process.env.E2E_PORT ?? 3199);
+const baseUrl = `http://127.0.0.1:${port}`;
+const schema = `e2e_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`;
+const rootSql = postgres(rootUrl, { ssl: "require", max: 1 });
+const appUrl = withSearchPath(rootUrl, schema);
+const sql = postgres(appUrl, { ssl: "require", max: 4 });
+const results = [];
+let server;
+let serverOutput = "";
+
+async function runChecks() {
+  const targetDate = "2026-08-12";
+  const originalSlot = "09:00";
+  const rescheduledSlot = "14:00";
+  const serviceId = "women-cut";
+  const staffId = "sophie";
+
+  const beforeSlots = await getSlots(serviceId, staffId, targetDate);
+  assert("Initial public availability includes target slot", beforeSlots.some((slot) => slot.time === originalSlot), beforeSlots.map((slot) => slot.time).join(", "));
+
+  const booking = await request("/api/bookings", {
+    method: "POST",
+    json: {
+      serviceId,
+      staffId,
+      date: targetDate,
+      startTime: originalSlot,
+      firstName: "E2E",
+      lastName: "Client",
+      email: "e2e.client@example.com",
+      phone: "+32 470 12 34 56",
+    },
+  });
+  const appointment = booking.body.appointment;
+  assert("1. Public booking creates exactly one appointment", booking.status === 201 && appointment?.reference, JSON.stringify(booking.body));
+  const countRows = await sql`select count(*)::int as count from appointments where booking_reference = ${appointment.reference}`;
+  assert("1a. PostgreSQL has exactly one appointment row", Number(countRows[0].count) === 1, `count=${countRows[0].count}`);
+
+  const afterSlots = await getSlots(serviceId, staffId, targetDate);
+  assert("2. Booked slot disappears from public availability", !afterSlots.some((slot) => slot.time === originalSlot), afterSlots.map((slot) => slot.time).join(", "));
+
+  const staffJar = await login("staff@maisonelegance.be", "staff123");
+  const otherStaffJar = await login("julien@maisonelegance.be", "staff123");
+  const adminJar = await login("admin@maisonelegance.be", "admin123");
+
+  const staffPage = await request("/staff", { jar: staffJar, raw: true });
+  assert("3. Assigned staff sees the appointment", staffPage.status === 200 && staffPage.text.includes("E2E Client"), `status=${staffPage.status}`);
+
+  const otherStart = await request(`/api/staff/appointments/${appointment.id}/start`, { method: "POST", jar: otherStaffJar, json: {} });
+  assert("4. Other staff cannot mutate it", otherStart.status === 403 || otherStart.status === 400, `status=${otherStart.status}`);
+
+  const staffAdmin = await request("/admin", { jar: staffJar, redirect: "manual", raw: true });
+  assert("19. Staff cannot access /admin", staffAdmin.status === 307 || staffAdmin.status === 302, `status=${staffAdmin.status}`);
+  const staffAdminApi = await request("/api/admin/products", { method: "POST", jar: staffJar, json: {} });
+  assert("19a. Staff cannot access admin APIs", staffAdminApi.status === 401 || staffAdminApi.status === 403, `status=${staffAdminApi.status}`);
+
+  const start = await request(`/api/staff/appointments/${appointment.id}/start`, { method: "POST", jar: staffJar, json: {} });
+  assert("5. Staff can start the appointment", start.status === 200, JSON.stringify(start.body));
+
+  const note = await request(`/api/staff/appointments/${appointment.id}/notes`, { method: "POST", jar: staffJar, json: { note: "E2E customer prefers quiet appointment.", customerNote: true } });
+  const noteRows = await sql`select count(*)::int as count from customer_notes`;
+  assert("6. Staff can add customer notes", note.status === 200 && Number(noteRows[0].count) === 1, `status=${note.status} notes=${noteRows[0].count}`);
+
+  const productBefore = await sql`select id::text, stock_quantity from products where sku = 'E2E-SHAMPOO'`;
+  const productId = productBefore[0].id;
+  const complete = await request(`/api/staff/appointments/${appointment.id}/complete`, {
+    method: "POST",
+    jar: staffJar,
+    json: { amount: 55, discount: 5, tip: 10, paymentMethod: "card", note: "E2E completed.", products: [{ productId, quantity: 2 }] },
+  });
+  assert("7. Staff can complete and record payment", complete.status === 200, JSON.stringify(complete.body));
+  const transactionRows = await sql`select amount, discount, tip from transactions where appointment_id = ${appointment.id}`;
+  assert("7a. Payment transaction is stored", transactionRows.length === 1 && Number(transactionRows[0].amount) === 55 && Number(transactionRows[0].discount) === 5 && Number(transactionRows[0].tip) === 10, JSON.stringify(transactionRows[0]));
+
+  const duplicate = await request(`/api/staff/appointments/${appointment.id}/complete`, {
+    method: "POST",
+    jar: staffJar,
+    json: { amount: 55, discount: 0, tip: 0, paymentMethod: "card", note: "", products: [] },
+  });
+  assert("8. Duplicate completion is impossible", duplicate.status === 409 || duplicate.status === 400, `status=${duplicate.status}`);
+
+  const overview = await request("/admin?period=custom&from=2026-08-12&to=2026-08-12", { jar: adminJar, raw: true });
+  assert("9. Admin revenue updates", overview.status === 200 && overview.text.includes("EUR 55"), `status=${overview.status}`);
+  const tipRows = await sql`select coalesce(sum(tip), 0)::numeric as tips from transactions where appointment_id = ${appointment.id}`;
+  assert("10. Tips update", Number(tipRows[0].tips) === 10, `tips=${tipRows[0].tips}`);
+
+  const productAfter = await sql`select stock_quantity from products where id = ${productId}`;
+  const saleRows = await sql`select quantity, total_price from product_sales where appointment_id = ${appointment.id}`;
+  const reportsCsv = await request("/api/admin/reports?period=custom&from=2026-08-12&to=2026-08-12", { jar: adminJar, raw: true });
+  assert("11. Product sale updates stock and reporting", Number(productAfter[0].stock_quantity) === Number(productBefore[0].stock_quantity) - 2 && saleRows.length === 1 && reportsCsv.text.includes("E2E Shampoo"), `stock=${productAfter[0].stock_quantity}`);
+
+  const expense = await request("/api/admin/expenses", { method: "POST", jar: adminJar, json: { category: "E2E", description: "E2E expense", supplier: "Verifier", amount: 100, expenseDate: targetDate } });
+  const overviewAfterExpense = await request("/admin?period=custom&from=2026-08-12&to=2026-08-12", { jar: adminJar, raw: true });
+  assert("12. Expense updates financial result", expense.status === 200 && overviewAfterExpense.text.includes("EUR 100"), `expenseStatus=${expense.status}`);
+
+  const second = await request("/api/bookings", {
+    method: "POST",
+    json: { serviceId, staffId, date: targetDate, startTime: "10:30", firstName: "Move", lastName: "Me", email: "move@example.com", phone: "+32 470 22 33 44" },
+  });
+  const secondAppointment = second.body.appointment;
+  const reschedule = await request(`/api/admin/appointments/${secondAppointment.id}`, {
+    method: "PATCH",
+    jar: adminJar,
+    json: { status: "confirmed", staffId, serviceId, date: targetDate, time: rescheduledSlot, notes: "Admin rescheduled." },
+  });
+  const slotsAfterMove = await getSlots(serviceId, staffId, targetDate);
+  const calendarAfterMove = await request(`/admin/calendar?date=${targetDate}&staffId=${staffId}`, { jar: adminJar, raw: true });
+  assert("13. Admin reschedule changes staff calendar and availability", reschedule.status === 200 && !slotsAfterMove.some((slot) => slot.time === rescheduledSlot) && calendarAfterMove.text.includes("14:00"), `reschedule=${reschedule.status}`);
+
+  const cancel = await request(`/api/admin/appointments/${secondAppointment.id}`, { method: "PATCH", jar: adminJar, json: { status: "cancelled", staffId, serviceId, date: targetDate, time: rescheduledSlot, notes: "Admin cancelled." } });
+  const slotsAfterCancel = await getSlots(serviceId, staffId, targetDate);
+  assert("14. Admin cancellation frees the slot", cancel.status === 200 && slotsAfterCancel.some((slot) => slot.time === rescheduledSlot), `cancel=${cancel.status}`);
+
+  const schedule = await request(`/api/admin/staff/${staffId}/schedule`, {
+    method: "PUT",
+    jar: adminJar,
+    json: { schedules: [{ day: 3, start: "13:00", end: "17:00", lunchStart: "", lunchEnd: "", active: true }] },
+  });
+  const slotsAfterSchedule = await getSlots(serviceId, staffId, targetDate);
+  assert("15. Staff schedule changes affect public availability", schedule.status === 200 && !slotsAfterSchedule.some((slot) => slot.time === "10:30") && slotsAfterSchedule.some((slot) => slot.time === "13:00"), slotsAfterSchedule.map((slot) => slot.time).join(", "));
+
+  const settings = await request("/api/admin/settings", {
+    method: "PATCH",
+    jar: adminJar,
+    json: {
+      salonName: "Maison Elegance",
+      address: "Avenue Louise 120",
+      phone: "+32 2 468 18 55",
+      email: "hello@maisonelegance.be",
+      bookingNotice: 120,
+      maximumBookingPeriod: 90,
+      cancellationDeadline: 24,
+      slotInterval: 30,
+      openingHours: [
+        { day: 0, active: false }, { day: 1, active: false }, { day: 2, active: true, open: "09:00", close: "18:00" },
+        { day: 3, active: true, open: "14:00", close: "17:00" }, { day: 4, active: true, open: "09:00", close: "20:00" },
+        { day: 5, active: true, open: "09:00", close: "19:00" }, { day: 6, active: true, open: "09:00", close: "18:00" },
+      ],
+    },
+  });
+  const slotsAfterHours = await getSlots(serviceId, staffId, targetDate);
+  assert("16. Salon opening-hour changes affect public availability", settings.status === 200 && !slotsAfterHours.some((slot) => slot.time === "13:00") && slotsAfterHours.some((slot) => slot.time === "14:00"), slotsAfterHours.map((slot) => slot.time).join(", "));
+
+  const durationChange = await request(`/api/admin/services/${serviceId}`, {
+    method: "PATCH",
+    jar: adminJar,
+    json: { name: "Women's Haircut", category: "Haircuts", description: "E2E duration change", price: 55, duration: 120, imageUrl: "", active: true, staffIds: [staffId, "julien"] },
+  });
+  const slotsAfterDuration = await getSlots(serviceId, staffId, targetDate);
+  assert("17. Service duration changes affect available slots", durationChange.status === 200 && slotsAfterDuration.length < slotsAfterHours.length, `before=${slotsAfterHours.length} after=${slotsAfterDuration.length}`);
+
+  await sql`update staff set active = false where id = 'julien'`;
+  const disabledLogin = await login("julien@maisonelegance.be", "staff123", false);
+  assert("18. Disabled staff cannot log in", disabledLogin.status === 303 && String(disabledLogin.headers.get("location") ?? "").includes("/login?error=invalid"), `status=${disabledLogin.status} location=${disabledLogin.headers.get("location")}`);
+
+  const adminLogoutHtml = await request("/admin", { jar: adminJar, raw: true });
+  const staffLogoutHtml = await request("/staff", { jar: staffJar, raw: true });
+  assert("20. Admin logout exists on desktop/mobile markup", adminLogoutHtml.text.includes("Sign out"), "Sign out missing");
+  assert("20a. Staff logout exists on desktop/mobile markup", staffLogoutHtml.text.includes("Logout"), "Logout missing");
+  const adminLogout = await request("/api/internal/logout", { method: "POST", jar: adminJar, redirect: "manual", raw: true });
+  const staffLogout = await request("/api/internal/logout", { method: "POST", jar: staffJar, redirect: "manual", raw: true });
+  const adminAfterLogout = await request("/admin", { jar: adminJar, redirect: "manual", raw: true });
+  const staffAfterLogout = await request("/staff", { jar: staffJar, redirect: "manual", raw: true });
+  assert("20b. Logout works from Admin", [302, 303, 307].includes(adminLogout.status) && [302, 307].includes(adminAfterLogout.status), `logout=${adminLogout.status} after=${adminAfterLogout.status}`);
+  assert("20c. Logout works from Staff", [302, 303, 307].includes(staffLogout.status) && [302, 307].includes(staffAfterLogout.status), `logout=${staffLogout.status} after=${staffAfterLogout.status}`);
+
+  await verifyRoutesAndMarkup(adminJar, staffJar);
+}
+
+async function verifyRoutesAndMarkup(adminJar, staffJar) {
+  const publicRoutes = ["/", "/services", "/team", "/gallery", "/reviews", "/about", "/contact", "/book", "/login"];
+  const adminRoutes = ["/admin", "/admin/calendar", "/admin/appointments", "/admin/customers", "/admin/staff", "/admin/services", "/admin/products", "/admin/payments", "/admin/expenses", "/admin/reports", "/admin/settings"];
+  const staffRoutes = ["/staff", "/staff/appointments", "/staff/calendar", "/staff/customers", "/staff/schedule", "/staff/performance"];
+  for (const route of publicRoutes) {
+    const response = await request(route, { raw: true });
+    assert(`Navigation route ${route}`, response.status === 200, `status=${response.status}`);
+    assert(`No dead hash links on ${route}`, !/href=["']#["']/.test(response.text), "found href=\"#\"");
+  }
+  for (const route of adminRoutes) {
+    const response = await request(route, { jar: adminJar, raw: true });
+    assert(`Admin route ${route}`, response.status === 200, `status=${response.status}`);
+    assert(`No placeholder text on ${route}`, !/not available yet|editing .* not available yet|intentionally present as a real protected route/i.test(response.text), "placeholder copy found");
+  }
+  for (const route of staffRoutes) {
+    const response = await request(route, { jar: staffJar, raw: true });
+    assert(`Staff route ${route}`, response.status === 200, `status=${response.status}`);
+    assert(`No placeholder text on ${route}`, !/not available yet|editing .* not available yet|intentionally present as a real protected route/i.test(response.text), "placeholder copy found");
+  }
+}
+
+async function getSlots(serviceId, staffId, date) {
+  const response = await request(`/api/availability/times?serviceId=${serviceId}&staffId=${staffId}&date=${date}`);
+  if (response.status !== 200) return [];
+  return response.body.slots ?? [];
+}
+
+async function login(email, password, expectSuccess = true) {
+  const jar = new CookieJar();
+  const response = await request("/api/internal/login", {
+    method: "POST",
+    jar,
+    redirect: "manual",
+    form: { email, password },
+    raw: true,
+  });
+  if (expectSuccess) assert(`Login ${email}`, [302, 303].includes(response.status), `status=${response.status}`);
+  return expectSuccess ? jar : response;
+}
+
+async function request(path, options = {}) {
+  const headers = new Headers(options.headers ?? {});
+  let body;
+  if (options.json !== undefined) {
+    headers.set("content-type", "application/json");
+    body = JSON.stringify(options.json);
+  }
+  if (options.form !== undefined) {
+    headers.set("content-type", "application/x-www-form-urlencoded");
+    body = new URLSearchParams(options.form).toString();
+  }
+  if (options.jar) {
+    const cookie = options.jar.header();
+    if (cookie) headers.set("cookie", cookie);
+  }
+  const response = await fetchWithTimeout(`${baseUrl}${path}`, {
+    method: options.method ?? "GET",
+    headers,
+    body,
+    redirect: options.redirect ?? "follow",
+  }, options.timeoutMs ?? 15000);
+  options.jar?.store(response.headers);
+  const text = await response.text();
+  if (options.raw) return { status: response.status, text, headers: response.headers };
+  let parsed = null;
+  try {
+    parsed = text ? JSON.parse(text) : null;
+  } catch {
+    parsed = { text };
+  }
+  return { status: response.status, body: parsed, text, headers: response.headers };
+}
+
+class CookieJar {
+  constructor() {
+    this.cookies = new Map();
+  }
+  store(headers) {
+    const values = typeof headers.getSetCookie === "function" ? headers.getSetCookie() : splitSetCookie(headers.get("set-cookie"));
+    for (const value of values) {
+      const [pair] = value.split(";");
+      const index = pair.indexOf("=");
+      if (index > 0) this.cookies.set(pair.slice(0, index), pair.slice(index + 1));
+    }
+  }
+  header() {
+    return Array.from(this.cookies.entries()).map(([key, value]) => `${key}=${value}`).join("; ");
+  }
+}
+
+function splitSetCookie(value) {
+  if (!value) return [];
+  return value.split(/,(?=\s*[^;,]+=)/g);
+}
+
+function assert(name, condition, detail = "") {
+  results.push({ name, status: condition ? "PASS" : "FAIL", detail: condition ? "" : detail });
+  console.log(`${condition ? "PASS" : "FAIL"}: ${name}${condition || !detail ? "" : ` -- ${detail}`}`);
+}
+
+function printResults() {
+  const pass = results.filter((item) => item.status === "PASS").length;
+  const fail = results.filter((item) => item.status === "FAIL").length;
+  console.log(`SUMMARY: ${pass} PASS, ${fail} FAIL`);
+}
+
+async function startServer() {
+  const child = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "start", "--", "--port", String(port), "--hostname", "127.0.0.1"], {
+    cwd: process.cwd(),
+    env: { ...process.env, POSTGRES_URL: appUrl, DATABASE_URL: "", INTERNAL_AUTH_SECRET: "e2e-functional-secret" },
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: process.platform === "win32",
+  });
+  child.stdout.on("data", (chunk) => { serverOutput += chunk.toString(); });
+  child.stderr.on("data", (chunk) => { serverOutput += chunk.toString(); });
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    await delay(500);
+    try {
+      const response = await fetchWithTimeout(`${baseUrl}/api/availability/times?serviceId=women-cut&staffId=sophie&date=2026-08-12`, {}, 3000);
+      if (response.status === 200) return child;
+    } catch {}
+    if (child.exitCode !== null) throw new Error(`Server exited early: ${serverOutput.slice(-2000)}`);
+  }
+  throw new Error(`Server did not become ready: ${serverOutput.slice(-2000)}`);
+}
+
+async function seed(db) {
+  const staffHash = await bcrypt.hash("staff123", 12);
+  const adminHash = await bcrypt.hash("admin123", 12);
+  await db`
+    insert into salon_settings (id, salon_name, description, address, phone, email, website, opening_hours)
+    values ('maison-elegance', 'Maison Elegance', 'E2E salon', 'Avenue Louise 120', '+32 2 468 18 55', 'hello@maisonelegance.be', 'http://localhost', '{}'::jsonb)
+  `;
+  await db`
+    insert into salon_opening_hours (day_of_week, open_time, close_time, active)
+    values
+      (0, null, null, false), (1, null, null, false), (2, '09:00', '18:00', true),
+      (3, '09:00', '18:00', true), (4, '09:00', '20:00', true), (5, '09:00', '19:00', true), (6, '09:00', '18:00', true)
+  `;
+  await db`
+    insert into services (id, name, category, description, price, duration, active)
+    values
+      ('women-cut', 'Women''s Haircut', 'Haircuts', 'Cut and styling.', 55, 60, true),
+      ('men-cut', 'Men''s Haircut', 'Haircuts', 'Precision cut.', 38, 40, true)
+  `;
+  await db`
+    insert into staff (id, first_name, last_name, job_title, bio, phone, email, languages, specialties, active)
+    values
+      ('sophie', 'Sophie', 'Laurent', 'Senior Stylist', 'Cuts and color.', '+32 471 15 81 21', 'sophie@maisonelegance.be', array['English'], array['Cuts'], true),
+      ('julien', 'Julien', 'Moreau', 'Master Stylist', 'Cuts.', '+32 471 15 81 22', 'julien@maisonelegance.be', array['English'], array['Cuts'], true)
+  `;
+  await db`insert into staff_services (staff_id, service_id) values ('sophie', 'women-cut'), ('julien', 'women-cut'), ('julien', 'men-cut')`;
+  await db`
+    insert into staff_working_hours (staff_id, day_of_week, start_time, end_time, lunch_start, lunch_end, active)
+    values
+      ('sophie', 3, '09:00', '17:00', '12:00', '13:00', true),
+      ('julien', 3, '09:00', '17:00', '12:00', '13:00', true)
+  `;
+  await db`
+    insert into profiles (first_name, last_name, email, phone, role, staff_id, password_hash, active)
+    values
+      ('Sophie', 'Laurent', 'staff@maisonelegance.be', '+32 471 15 81 21', 'staff', 'sophie', ${staffHash}, true),
+      ('Julien', 'Moreau', 'julien@maisonelegance.be', '+32 471 15 81 22', 'staff', 'julien', ${staffHash}, true),
+      ('Admin', 'Manager', 'admin@maisonelegance.be', '+32 2 468 18 55', 'admin', null, ${adminHash}, true)
+  `;
+  await db`insert into products (name, sku, cost_price, sale_price, stock_quantity, active) values ('E2E Shampoo', 'E2E-SHAMPOO', 8, 20, 5, true)`;
+}
+
+function withSearchPath(url, schemaName) {
+  const parsed = new URL(url);
+  parsed.searchParams.set("options", `--search_path=${schemaName}`);
+  return parsed.toString();
+}
+
+function quoteIdent(value) {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 15000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function killTree(pid) {
+  if (!pid) return;
+  try {
+    if (process.platform === "win32") {
+      execFileSync("taskkill", ["/pid", String(pid), "/t", "/f"], { stdio: "ignore" });
+    } else {
+      process.kill(-pid, "SIGTERM");
+    }
+  } catch {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+  }
+}
+
+async function main() {
+  try {
+    await rootSql.unsafe(`create schema ${quoteIdent(schema)}`);
+    await sql.unsafe(await readFile("database/schema.sql", "utf8"));
+    await seed(sql);
+    server = await startServer();
+    await runChecks();
+    printResults();
+    if (results.some((item) => item.status === "FAIL")) {
+      if (serverOutput) console.log(`SERVER OUTPUT:\n${serverOutput.slice(-4000)}`);
+      process.exitCode = 1;
+    }
+  } catch (error) {
+    results.push({ name: "E2E harness", status: "FAIL", detail: error instanceof Error ? error.message : String(error) });
+    console.log(`FAIL: E2E harness -- ${error instanceof Error ? error.message : String(error)}`);
+    printResults();
+    process.exitCode = 1;
+  } finally {
+    if (server) killTree(server.pid);
+    await sql.end({ timeout: 1 }).catch(() => {});
+    await rootSql.unsafe(`drop schema if exists ${quoteIdent(schema)} cascade`).catch(() => {});
+    await rootSql.end({ timeout: 1 }).catch(() => {});
+  }
+}
+
+await main();

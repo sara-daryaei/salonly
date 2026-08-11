@@ -264,7 +264,7 @@ export async function addStaffAppointmentNote(input: { appointmentId: string; st
   const db = requireDatabase();
   await db.begin(async (tx) => {
     const [appointment] = await tx`
-      select id::text, customer_id::text
+      select id::text, customer_id
       from appointments
       where id = ${input.appointmentId} and staff_id = ${input.staffId}
       for update
@@ -272,7 +272,7 @@ export async function addStaffAppointmentNote(input: { appointmentId: string; st
     if (!appointment) throw new ForbiddenError("Not authorized for this appointment.");
     await tx`
       update appointments
-      set notes = concat_ws(E'\n', nullif(notes, ''), ${`Staff note: ${note}`})
+      set notes = concat_ws(E'\n', nullif(notes, ''), ${`Staff note: ${note}`}::text)
       where id = ${input.appointmentId}
     `;
     if (input.customerNote) {
