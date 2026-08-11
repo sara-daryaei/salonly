@@ -12,6 +12,8 @@ import { getServiceRevenueReport, getStaffRevenueReport } from "@/lib/internal/r
 import { listActiveProducts, listProductSales } from "@/lib/internal/products";
 import { getTodayWorkLog } from "@/lib/internal/work-logs";
 import type { Appointment } from "@/lib/salon-data";
+import { buildBookingReference } from "@/lib/availability";
+import { brusselsDateTimeToUtc, validateDatabaseBookingRequest } from "@/lib/booking-db";
 
 export type InternalStaff = {
   id: string;
@@ -166,7 +168,7 @@ export async function completeAppointment(input: {
   appointmentId: string;
   staffId: string;
   actorProfileId: string;
-  amount: number;
+  grossAmount: number;
   discount: number;
   tip: number;
   paymentMethod: string;
@@ -192,7 +194,7 @@ export async function completeAppointment(input: {
 
     await tx`
       insert into transactions (appointment_id, customer_id, staff_id, amount, discount, tip, payment_method, payment_status, transaction_type)
-      values (${input.appointmentId}, ${appointment.customer_id}, ${appointment.staff_id}, ${payment.amount}, ${payment.discount}, ${payment.tip}, ${payment.paymentMethod}, 'paid', 'service')
+      values (${input.appointmentId}, ${appointment.customer_id}, ${appointment.staff_id}, ${payment.netAmount}, ${payment.discount}, ${payment.tip}, ${payment.paymentMethod}, 'paid', 'service')
     `;
     for (const product of input.products ?? []) {
       await sellProductInTransaction(tx, {
@@ -211,7 +213,7 @@ export async function completeAppointment(input: {
     }
     await tx`
       insert into audit_logs (user_id, action, entity_type, entity_id, metadata)
-      values (${input.actorProfileId}, 'appointment_completed', 'appointment', ${input.appointmentId}, ${JSON.stringify({ amount: payment.amount, tip: payment.tip, paymentMethod: payment.paymentMethod })})
+      values (${input.actorProfileId}, 'appointment_completed', 'appointment', ${input.appointmentId}, ${JSON.stringify({ grossAmount: payment.grossAmount, netAmount: payment.netAmount, discount: payment.discount, tip: payment.tip, paymentMethod: payment.paymentMethod })})
     `;
   });
 }
@@ -312,6 +314,52 @@ export async function sellAppointmentProduct(input: { appointmentId: string; sta
   });
 }
 
+export async function scheduleStaffNextAppointment(input: {
+  customerId: string;
+  staffId: string;
+  actorProfileId: string;
+  serviceId: string;
+  date: string;
+  startTime: string;
+  notes?: string;
+}) {
+  const db = requireDatabase();
+  const validation = await validateDatabaseBookingRequest({
+    serviceId: input.serviceId,
+    staffId: input.staffId,
+    date: input.date,
+    startTime: input.startTime,
+  });
+  if (!validation.ok) throw new ValidationError(validation.error);
+
+  await db.begin(async (tx) => {
+    const [customer] = await tx`
+      select c.id
+      from customers c
+      where c.id = ${input.customerId}
+        and exists (
+          select 1 from appointments a
+          where a.customer_id = c.id and a.staff_id = ${input.staffId}
+        )
+      limit 1
+    `;
+    if (!customer) throw new ForbiddenError("Not authorized for this customer.");
+
+    const reference = buildBookingReference(input.date);
+    const startAt = brusselsDateTimeToUtc(input.date, input.startTime);
+    const endAt = brusselsDateTimeToUtc(input.date, validation.endTime);
+    const [appointment] = await tx`
+      insert into appointments (booking_reference, customer_id, service_id, staff_id, start_at, end_at, duration, price, status, notes)
+      values (${reference}, ${input.customerId}, ${validation.service.id}, ${input.staffId}, ${startAt.toISOString()}, ${endAt.toISOString()}, ${validation.service.duration}, ${validation.service.price}, 'confirmed', ${input.notes || "Scheduled by staff."})
+      returning id::text, booking_reference
+    `;
+    await tx`
+      insert into audit_logs (user_id, action, entity_type, entity_id, metadata)
+      values (${input.actorProfileId}, 'staff_next_appointment_scheduled', 'appointment', ${appointment.id}, ${JSON.stringify({ customerId: input.customerId, serviceId: input.serviceId })})
+    `;
+  });
+}
+
 export async function createExpense(input: { actorProfileId: string; category: string; description: string; amount: number; supplier: string; expenseDate: string }) {
   const validation = validateExpenseInput(input);
   if (!validation.ok) throw new ValidationError(validation.error);
@@ -352,14 +400,15 @@ async function sellProductInTransaction(tx: TransactionSql<Record<string, never>
 }
 
 function calculateMetrics(appointments: InternalAppointment[], transactions: Record<string, unknown>[]): DashboardMetrics {
-  const revenue = transactions.reduce((sum, transaction) => sum + Number(transaction.amount), 0);
-  const tips = transactions.reduce((sum, transaction) => sum + Number(transaction.tip), 0);
+  const serviceTransactions = transactions.filter((transaction) => transaction.transaction_type === "service" && transaction.payment_status === "paid");
+  const revenue = serviceTransactions.reduce((sum, transaction) => sum + Number(transaction.amount), 0);
+  const tips = serviceTransactions.reduce((sum, transaction) => sum + Number(transaction.tip), 0);
   return {
     appointments: appointments.length,
     completed: appointments.filter((appointment) => appointment.status === "completed").length,
     revenue,
     tips,
-    averageTicket: transactions.length ? revenue / transactions.length : 0,
+    averageTicket: serviceTransactions.length ? revenue / serviceTransactions.length : 0,
     cancelled: appointments.filter((appointment) => appointment.status === "cancelled").length,
     noShow: appointments.filter((appointment) => appointment.status === "no_show").length,
   };

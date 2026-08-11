@@ -22,6 +22,17 @@ test("payment input rejects negative, invalid and arbitrary methods", () => {
   assert.equal(validatePaymentInput({ amount: 55, discount: 0, tip: 0, paymentMethod: "wire" }).ok, false);
 });
 
+test("payment input computes net service amount and keeps tips separate", () => {
+  const result = validatePaymentInput({ grossAmount: 55, discount: 5, tip: 10, paymentMethod: "card" });
+  assert.equal(result.ok, true);
+  if (result.ok) {
+    assert.equal(result.grossAmount, 55);
+    assert.equal(result.discount, 5);
+    assert.equal(result.netAmount, 50);
+    assert.equal(result.tip, 10);
+  }
+});
+
 test("expense input rejects invalid payloads", () => {
   assert.equal(validateExpenseInput({ category: "Marketing", description: "Campaign", amount: 100, expenseDate: "2026-08-10" }).ok, true);
   assert.equal(validateExpenseInput({ category: "", description: "Campaign", amount: 100, expenseDate: "2026-08-10" }).ok, false);
@@ -48,6 +59,22 @@ test("staff revenue aggregation does not fan out transactions across appointment
   assert.equal(rows[0].revenue, 150);
   assert.equal(rows[0].tips, 15);
   assert.equal(rows[0].averageTicket, 75);
+});
+
+test("admin customer and service queries are protected against fan-out", () => {
+  const source = readFileSync("src/lib/internal/admin.ts", "utf8");
+  assert.match(source, /appointment_stats as/);
+  assert.match(source, /transaction_stats as/);
+  assert.match(source, /product_stats as/);
+  assert.match(source, /count\(distinct a\.id\)::int as appointment_count/);
+});
+
+test("financial reports only count paid service transactions for service revenue", () => {
+  const adminSource = readFileSync("src/lib/internal/admin.ts", "utf8");
+  const reportSource = readFileSync("src/lib/internal/reports.ts", "utf8");
+  assert.match(adminSource, /payment_status = 'paid'[\s\S]*transaction_type = 'service'/);
+  assert.match(reportSource, /transaction_type = 'service'[\s\S]*payment_status = 'paid'/);
+  assert.match(adminSource, /operationalResult: serviceRevenue \+ productRevenue - expenseTotal/);
 });
 
 test("migration includes database-driven salon opening hours", () => {

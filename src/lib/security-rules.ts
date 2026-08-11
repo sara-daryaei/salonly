@@ -16,26 +16,26 @@ export function canTransitionAppointment(from: AppointmentStatus, to: Appointmen
   return staffStatusTransitions[from]?.includes(to) ?? false;
 }
 
-export function validatePaymentInput(input: { amount: unknown; discount: unknown; tip: unknown; paymentMethod: unknown }) {
-  const amount = Number(input.amount);
+export function validatePaymentInput(input: { grossAmount?: unknown; amount?: unknown; discount: unknown; tip: unknown; paymentMethod: unknown }) {
+  const grossAmount = Number(input.grossAmount ?? input.amount);
   const discount = Number(input.discount);
   const tip = Number(input.tip);
   const method = String(input.paymentMethod ?? "");
 
-  if (!Number.isFinite(amount) || !Number.isFinite(discount) || !Number.isFinite(tip)) {
+  if (!Number.isFinite(grossAmount) || !Number.isFinite(discount) || !Number.isFinite(tip)) {
     return { ok: false as const, error: "Payment values must be valid numbers." };
   }
-  if (amount < 0 || discount < 0 || tip < 0) {
+  if (grossAmount < 0 || discount < 0 || tip < 0) {
     return { ok: false as const, error: "Payment values cannot be negative." };
   }
-  if (discount > amount) {
+  if (discount > grossAmount) {
     return { ok: false as const, error: "Discount cannot exceed the payment amount." };
   }
   if (!paymentMethods.includes(method as PaymentMethod)) {
     return { ok: false as const, error: "Unsupported payment method." };
   }
 
-  return { ok: true as const, amount, discount, tip, paymentMethod: method as PaymentMethod };
+  return { ok: true as const, grossAmount, discount, netAmount: grossAmount - discount, tip, paymentMethod: method as PaymentMethod };
 }
 
 export function validateExpenseInput(input: { category: unknown; description: unknown; amount: unknown; expenseDate: unknown; supplier?: unknown }) {

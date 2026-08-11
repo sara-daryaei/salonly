@@ -38,6 +38,7 @@ export async function listAdminOverview(range: DateRange) {
       where created_at >= (${range.from}::date at time zone 'Europe/Brussels')
         and created_at < (((${range.to}::date + interval '1 day') at time zone 'Europe/Brussels'))
         and payment_status = 'paid'
+        and transaction_type = 'service'
     `,
     db`
       select total_price
@@ -71,7 +72,8 @@ export async function listAdminOverview(range: DateRange) {
     productRevenue,
     tips,
     expenses: expenseTotal,
-    operationalResult: serviceRevenue + productRevenue + tips - expenseTotal,
+    // Tips are tracked separately for staff/customer transparency; they do not inflate salon operating result.
+    operationalResult: serviceRevenue + productRevenue - expenseTotal,
     appointments: appointmentCount,
     completed,
     cancelled: appointments.filter((row) => row.status === "cancelled").length,
@@ -106,18 +108,40 @@ export async function listAdminAppointments(filter: { q?: string; from?: string;
 export async function listAdminCustomers(filter: { q?: string } = {}) {
   const db = requireDatabase();
   return db`
+    with appointment_stats as (
+      select customer_id,
+        count(*)::int as appointments,
+        max(start_at) filter (where start_at <= now())::text as last_visit,
+        min(start_at) filter (where start_at > now() and status in ('pending','confirmed','in_progress'))::text as next_appointment,
+        count(*) filter (where status = 'no_show')::int as no_show_count,
+        count(*) filter (where status = 'cancelled')::int as cancellation_count
+      from appointments
+      group by customer_id
+    ),
+    transaction_stats as (
+      select customer_id, coalesce(sum(amount), 0)::numeric as service_spend
+      from transactions
+      where payment_status = 'paid' and transaction_type = 'service'
+      group by customer_id
+    ),
+    product_stats as (
+      select customer_id, coalesce(sum(total_price), 0)::numeric as product_spend
+      from product_sales
+      group by customer_id
+    )
     select c.id::text, c.first_name, c.last_name, c.email, c.phone, c.notes, c.created_at::text,
-      count(a.id)::int as appointments,
-      coalesce(sum(t.amount), 0)::numeric + coalesce((select sum(ps.total_price) from product_sales ps where ps.customer_id = c.id), 0)::numeric as total_spend,
-      max(a.start_at) filter (where a.start_at <= now())::text as last_visit,
-      min(a.start_at) filter (where a.start_at > now() and a.status in ('pending','confirmed','in_progress'))::text as next_appointment,
-      count(a.id) filter (where a.status = 'no_show')::int as no_show_count,
-      count(a.id) filter (where a.status = 'cancelled')::int as cancellation_count
+      coalesce(a.appointments, 0)::int as appointments,
+      coalesce(t.service_spend, 0)::numeric as service_spend,
+      coalesce(p.product_spend, 0)::numeric as product_spend,
+      coalesce(t.service_spend, 0)::numeric + coalesce(p.product_spend, 0)::numeric as total_spend,
+      a.last_visit, a.next_appointment,
+      coalesce(a.no_show_count, 0)::int as no_show_count,
+      coalesce(a.cancellation_count, 0)::int as cancellation_count
     from customers c
-    left join appointments a on a.customer_id = c.id
-    left join transactions t on t.customer_id = c.id and t.payment_status = 'paid'
+    left join appointment_stats a on a.customer_id = c.id
+    left join transaction_stats t on t.customer_id = c.id
+    left join product_stats p on p.customer_id = c.id
     where (${filter.q ?? null}::text is null or c.first_name ilike ${like(filter.q)} or c.last_name ilike ${like(filter.q)} or c.email ilike ${like(filter.q)} or c.phone ilike ${like(filter.q)})
-    group by c.id
     order by last_visit desc nulls last, c.created_at desc
   `;
 }
@@ -125,18 +149,42 @@ export async function listAdminCustomers(filter: { q?: string } = {}) {
 export async function getAdminCustomer(customerId: string) {
   const db = requireDatabase();
   const [customer] = await db`
+    with appointment_stats as (
+      select customer_id,
+        count(*)::int as appointments,
+        max(start_at) filter (where start_at <= now())::text as last_visit,
+        min(start_at) filter (where start_at > now() and status in ('pending','confirmed','in_progress'))::text as next_appointment,
+        count(*) filter (where status = 'no_show')::int as no_show_count,
+        count(*) filter (where status = 'cancelled')::int as cancellation_count
+      from appointments
+      where customer_id = ${customerId}
+      group by customer_id
+    ),
+    transaction_stats as (
+      select customer_id, coalesce(sum(amount), 0)::numeric as service_spend
+      from transactions
+      where customer_id = ${customerId} and payment_status = 'paid' and transaction_type = 'service'
+      group by customer_id
+    ),
+    product_stats as (
+      select customer_id, coalesce(sum(total_price), 0)::numeric as product_spend
+      from product_sales
+      where customer_id = ${customerId}
+      group by customer_id
+    )
     select c.id::text, c.first_name, c.last_name, c.email, c.phone, c.notes, c.created_at::text,
-      count(a.id)::int as appointments,
-      coalesce(sum(t.amount), 0)::numeric + coalesce((select sum(ps.total_price) from product_sales ps where ps.customer_id = c.id), 0)::numeric as total_spend,
-      max(a.start_at) filter (where a.start_at <= now())::text as last_visit,
-      min(a.start_at) filter (where a.start_at > now() and a.status in ('pending','confirmed','in_progress'))::text as next_appointment,
-      count(a.id) filter (where a.status = 'no_show')::int as no_show_count,
-      count(a.id) filter (where a.status = 'cancelled')::int as cancellation_count
+      coalesce(a.appointments, 0)::int as appointments,
+      coalesce(t.service_spend, 0)::numeric as service_spend,
+      coalesce(p.product_spend, 0)::numeric as product_spend,
+      coalesce(t.service_spend, 0)::numeric + coalesce(p.product_spend, 0)::numeric as total_spend,
+      a.last_visit, a.next_appointment,
+      coalesce(a.no_show_count, 0)::int as no_show_count,
+      coalesce(a.cancellation_count, 0)::int as cancellation_count
     from customers c
-    left join appointments a on a.customer_id = c.id
-    left join transactions t on t.customer_id = c.id and t.payment_status = 'paid'
+    left join appointment_stats a on a.customer_id = c.id
+    left join transaction_stats t on t.customer_id = c.id
+    left join product_stats p on p.customer_id = c.id
     where c.id = ${customerId}
-    group by c.id
     limit 1
   `;
   const appointments = await db`
@@ -184,8 +232,8 @@ export async function listInternalAccounts() {
 export async function listAdminServices() {
   const db = requireDatabase();
   return db`
-    select s.*, coalesce(array_agg(ss.staff_id) filter (where ss.staff_id is not null), '{}') as staff_ids,
-      count(a.id)::int as appointment_count
+    select s.*, coalesce(array_agg(distinct ss.staff_id) filter (where ss.staff_id is not null), '{}') as staff_ids,
+      count(distinct a.id)::int as appointment_count
     from services s
     left join staff_services ss on ss.service_id = s.id
     left join appointments a on a.service_id = s.id
@@ -219,9 +267,9 @@ export async function listAdminReports(range: DateRange) {
   const fromSql = range.from;
   const toSql = range.to;
   const [staffRevenue, serviceRevenue, methodRevenue, statusCounts, expenses, products, retention] = await Promise.all([
-    db`select st.first_name || ' ' || st.last_name as label, coalesce(sum(t.amount),0)::numeric as value from staff st left join transactions t on t.staff_id = st.id and t.created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and t.created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) and t.payment_status = 'paid' group by st.id order by value desc`,
-    db`select s.name as label, coalesce(sum(t.amount),0)::numeric as value from services s left join appointments a on a.service_id = s.id left join transactions t on t.appointment_id = a.id and t.created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and t.created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) and t.payment_status = 'paid' group by s.id order by value desc`,
-    db`select payment_method as label, coalesce(sum(amount),0)::numeric as value from transactions where created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) group by payment_method order by value desc`,
+    db`select st.first_name || ' ' || st.last_name as label, coalesce(sum(t.amount),0)::numeric as value from staff st left join transactions t on t.staff_id = st.id and t.created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and t.created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) and t.payment_status = 'paid' and t.transaction_type = 'service' group by st.id order by value desc`,
+    db`select s.name as label, coalesce(sum(t.amount),0)::numeric as value from services s left join appointments a on a.service_id = s.id left join transactions t on t.appointment_id = a.id and t.created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and t.created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) and t.payment_status = 'paid' and t.transaction_type = 'service' group by s.id order by value desc`,
+    db`select payment_method as label, coalesce(sum(amount),0)::numeric as value from transactions where created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) and payment_status = 'paid' group by payment_method order by value desc`,
     db`select status::text as label, count(*)::int as value from appointments where start_at >= (${fromSql}::date at time zone 'Europe/Brussels') and start_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) group by status order by value desc`,
     db`select category as label, coalesce(sum(amount),0)::numeric as value from expenses where expense_date >= ${fromSql}::date and expense_date <= ${toSql}::date group by category order by value desc`,
     db`select p.name as label, coalesce(sum(ps.total_price),0)::numeric as value from products p left join product_sales ps on ps.product_id = p.id and ps.created_at >= (${fromSql}::date at time zone 'Europe/Brussels') and ps.created_at < (((${toSql}::date + interval '1 day') at time zone 'Europe/Brussels')) group by p.id order by value desc`,

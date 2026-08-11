@@ -18,6 +18,7 @@ export async function getStaffRevenueReport() {
         count(*)::int as transaction_count
       from transactions
       where transaction_type = 'service'
+        and payment_status = 'paid'
       group by staff_id
     )
     select st.id as staff_id,
@@ -57,7 +58,7 @@ export async function getServiceRevenueReport() {
       coalesce(sum(t.amount), 0)::numeric as revenue
     from services s
     left join appointments a on a.service_id = s.id
-    left join transactions t on t.appointment_id = a.id and t.transaction_type = 'service'
+    left join transactions t on t.appointment_id = a.id and t.transaction_type = 'service' and t.payment_status = 'paid'
     where s.active = true
     group by s.id, s.name
     having count(distinct a.id) > 0

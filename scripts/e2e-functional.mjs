@@ -3,9 +3,9 @@ import { execFileSync, spawn } from "node:child_process";
 import postgres from "postgres";
 import bcrypt from "bcryptjs";
 
-const rootUrl = process.env.E2E_DATABASE_URL ?? process.env.POSTGRES_URL ?? process.env.DATABASE_URL;
+const rootUrl = process.env.E2E_DATABASE_URL;
 if (!rootUrl) {
-  console.error("E2E_DATABASE_URL, POSTGRES_URL or DATABASE_URL is required.");
+  console.error("E2E_DATABASE_URL is required. Refusing to fall back to production credentials.");
   process.exit(1);
 }
 
@@ -21,6 +21,7 @@ let serverOutput = "";
 
 async function runChecks() {
   const targetDate = "2026-08-12";
+  const financialDate = brusselsDate(new Date());
   const originalSlot = "09:00";
   const rescheduledSlot = "14:00";
   const serviceId = "women-cut";
@@ -77,31 +78,51 @@ async function runChecks() {
   const complete = await request(`/api/staff/appointments/${appointment.id}/complete`, {
     method: "POST",
     jar: staffJar,
-    json: { amount: 55, discount: 5, tip: 10, paymentMethod: "card", note: "E2E completed.", products: [{ productId, quantity: 2 }] },
+    json: { grossAmount: 55, discount: 5, tip: 10, paymentMethod: "card", note: "E2E completed.", products: [] },
   });
   assert("7. Staff can complete and record payment", complete.status === 200, JSON.stringify(complete.body));
   const transactionRows = await sql`select amount, discount, tip from transactions where appointment_id = ${appointment.id}`;
-  assert("7a. Payment transaction is stored", transactionRows.length === 1 && Number(transactionRows[0].amount) === 55 && Number(transactionRows[0].discount) === 5 && Number(transactionRows[0].tip) === 10, JSON.stringify(transactionRows[0]));
+  assert("7a. Payment transaction stores net service revenue", transactionRows.length === 1 && Number(transactionRows[0].amount) === 50 && Number(transactionRows[0].discount) === 5 && Number(transactionRows[0].tip) === 10, JSON.stringify(transactionRows[0]));
+  const accidentalProductRows = await sql`select count(*)::int as count from product_sales where appointment_id = ${appointment.id}`;
+  assert("7b. Completing with no product selected creates zero product_sales", Number(accidentalProductRows[0].count) === 0, `product_sales=${accidentalProductRows[0].count}`);
 
   const duplicate = await request(`/api/staff/appointments/${appointment.id}/complete`, {
     method: "POST",
     jar: staffJar,
-    json: { amount: 55, discount: 0, tip: 0, paymentMethod: "card", note: "", products: [] },
+    json: { grossAmount: 55, discount: 0, tip: 0, paymentMethod: "card", note: "", products: [] },
   });
   assert("8. Duplicate completion is impossible", duplicate.status === 409 || duplicate.status === 400, `status=${duplicate.status}`);
 
-  const overview = await request("/admin?period=custom&from=2026-08-12&to=2026-08-12", { jar: adminJar, raw: true });
-  assert("9. Admin revenue updates", overview.status === 200 && overview.text.includes("EUR 55"), `status=${overview.status}`);
+  const overview = await request(`/admin?period=custom&from=${financialDate}&to=${financialDate}`, { jar: adminJar, raw: true });
+  assert("9. Admin revenue updates", overview.status === 200 && normalizedText(overview.text).includes("EUR 50"), `status=${overview.status}`);
   const tipRows = await sql`select coalesce(sum(tip), 0)::numeric as tips from transactions where appointment_id = ${appointment.id}`;
   assert("10. Tips update", Number(tipRows[0].tips) === 10, `tips=${tipRows[0].tips}`);
+  const serviceRevenueRows = await sql`select coalesce(sum(amount), 0)::numeric as revenue, coalesce(sum(tip), 0)::numeric as tips from transactions where payment_status = 'paid' and transaction_type = 'service'`;
+  assert("10a. Tips do not inflate service revenue", Number(serviceRevenueRows[0].revenue) === 50 && Number(serviceRevenueRows[0].tips) === 10, JSON.stringify(serviceRevenueRows[0]));
 
+  const productBooking = await request("/api/bookings", {
+    method: "POST",
+    json: { serviceId, staffId, date: targetDate, startTime: "10:30", firstName: "Product", lastName: "Client", email: "product@example.com", phone: "+32 470 99 88 77" },
+  });
+  const productAppointment = productBooking.body.appointment;
+  const standaloneSale = await request(`/api/staff/appointments/${productAppointment.id}/product-sales`, { method: "POST", jar: staffJar, json: { productId, quantity: 2 } });
+  const completeAfterSale = await request(`/api/staff/appointments/${productAppointment.id}/complete`, { method: "POST", jar: staffJar, json: { grossAmount: 55, discount: 0, tip: 0, paymentMethod: "card", note: "", products: [] } });
   const productAfter = await sql`select stock_quantity from products where id = ${productId}`;
-  const saleRows = await sql`select quantity, total_price from product_sales where appointment_id = ${appointment.id}`;
-  const reportsCsv = await request("/api/admin/reports?period=custom&from=2026-08-12&to=2026-08-12", { jar: adminJar, raw: true });
-  assert("11. Product sale updates stock and reporting", Number(productAfter[0].stock_quantity) === Number(productBefore[0].stock_quantity) - 2 && saleRows.length === 1 && reportsCsv.text.includes("E2E Shampoo"), `stock=${productAfter[0].stock_quantity}`);
+  const saleRows = await sql`select quantity, total_price from product_sales where appointment_id = ${productAppointment.id}`;
+  const reportsCsv = await request(`/api/admin/reports?period=custom&from=${financialDate}&to=${financialDate}`, { jar: adminJar, raw: true });
+  assert("11. Product sale updates stock and reporting", standaloneSale.status === 200 && completeAfterSale.status === 200 && Number(productAfter[0].stock_quantity) === Number(productBefore[0].stock_quantity) - 2 && saleRows.length === 1 && reportsCsv.text.includes("E2E Shampoo"), `stock=${productAfter[0].stock_quantity} sales=${saleRows.length}`);
+  const totalServiceRevenueRows = await sql`select coalesce(sum(amount), 0)::numeric as revenue from transactions where payment_status = 'paid' and transaction_type = 'service'`;
+  assert("11a. Product revenue does not inflate service transaction revenue", Number(totalServiceRevenueRows[0].revenue) === 105, `revenue=${totalServiceRevenueRows[0].revenue}`);
 
-  const expense = await request("/api/admin/expenses", { method: "POST", jar: adminJar, json: { category: "E2E", description: "E2E expense", supplier: "Verifier", amount: 100, expenseDate: targetDate } });
-  const overviewAfterExpense = await request("/admin?period=custom&from=2026-08-12&to=2026-08-12", { jar: adminJar, raw: true });
+  const [customerRow] = await sql`select customer_id::text from appointments where id = ${appointment.id}`;
+  const next = await request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: staffJar, json: { serviceId, date: targetDate, startTime: "15:30", notes: "E2E next appointment." } });
+  const slotsAfterNext = await getSlots(serviceId, staffId, targetDate);
+  const staffAppointmentsAfterNext = await request("/staff/appointments", { jar: staffJar, raw: true });
+  const adminAppointmentsAfterNext = await request("/admin/appointments?q=E2E", { jar: adminJar, raw: true });
+  assert("11b. Schedule Next Appointment respects availability", next.status === 200 && !slotsAfterNext.some((slot) => slot.time === "15:30") && staffAppointmentsAfterNext.text.includes("15:30") && adminAppointmentsAfterNext.text.includes("15:30"), `next=${next.status}`);
+
+  const expense = await request("/api/admin/expenses", { method: "POST", jar: adminJar, json: { category: "E2E", description: "E2E expense", supplier: "Verifier", amount: 100, expenseDate: financialDate } });
+  const overviewAfterExpense = await request(`/admin?period=custom&from=${financialDate}&to=${financialDate}`, { jar: adminJar, raw: true });
   assert("12. Expense updates financial result", expense.status === 200 && overviewAfterExpense.text.includes("EUR 100"), `expenseStatus=${expense.status}`);
 
   const second = await request("/api/bookings", {
@@ -271,6 +292,21 @@ class CookieJar {
 function splitSetCookie(value) {
   if (!value) return [];
   return value.split(/,(?=\s*[^;,]+=)/g);
+}
+
+function normalizedText(html) {
+  return html.replace(/<!--.*?-->/g, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function brusselsDate(value) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Brussels",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const part = (type) => parts.find((item) => item.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
 function assert(name, condition, detail = "") {

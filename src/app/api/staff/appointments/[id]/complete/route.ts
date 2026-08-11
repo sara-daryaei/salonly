@@ -18,7 +18,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       appointmentId: id,
       staffId: session.staffId,
       actorProfileId: session.profileId,
-      amount: Number(body.amount ?? 0),
+      grossAmount: Number(body.grossAmount ?? body.amount ?? 0),
       discount: Number(body.discount ?? 0),
       tip: Number(body.tip ?? 0),
       paymentMethod: String(body.paymentMethod ?? "card"),

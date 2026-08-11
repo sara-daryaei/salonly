@@ -87,7 +87,7 @@ function AppointmentPanel({ appointment, products, onCleared }: { appointment: S
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [productId, setProductId] = useState(String(products[0]?.id ?? ""));
+  const [productId, setProductId] = useState("");
   const [quantity, setQuantity] = useState(1);
 
   if (!appointment) {
@@ -118,7 +118,7 @@ function AppointmentPanel({ appointment, products, onCleared }: { appointment: S
 
   async function complete(formData: FormData) {
     const ok = await postAction("complete", {
-        amount: Number(formData.get("amount")),
+        grossAmount: Number(formData.get("grossAmount")),
         discount: Number(formData.get("discount")),
         tip: Number(formData.get("tip")),
         paymentMethod: formData.get("paymentMethod"),
@@ -163,7 +163,11 @@ function AppointmentPanel({ appointment, products, onCleared }: { appointment: S
   }
 
   async function sellProduct() {
-    await postAction("product-sales", { productId, quantity }, "Product sale recorded.");
+    const ok = await postAction("product-sales", { productId, quantity }, "Product sale recorded.");
+    if (ok) {
+      setProductId("");
+      setQuantity(1);
+    }
   }
 
   const terminal = ["completed", "cancelled", "no_show"].includes(appointment.status);
@@ -184,7 +188,7 @@ function AppointmentPanel({ appointment, products, onCleared }: { appointment: S
       {!terminal ? <form action={complete} className="mt-6 space-y-3">
         <p className="text-sm font-semibold text-[#64736d]">Service price EUR {appointment.price}. Transaction amount stores net service revenue after discount. Product revenue is stored separately.</p>
         <div className="grid grid-cols-3 gap-2">
-          <label className="text-xs font-bold">Amount<input name="amount" type="number" step="0.01" defaultValue={appointment.price} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm" /></label>
+          <label className="text-xs font-bold">Gross amount<input name="grossAmount" type="number" step="0.01" defaultValue={appointment.price} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm" /></label>
           <label className="text-xs font-bold">Discount<input name="discount" type="number" step="0.01" defaultValue={0} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm" /></label>
           <label className="text-xs font-bold">Tip<input name="tip" type="number" step="0.01" defaultValue={0} className="mt-1 w-full rounded-xl border border-black/10 px-3 py-2 text-sm" /></label>
         </div>
