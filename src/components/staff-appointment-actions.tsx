@@ -169,7 +169,7 @@ export function StaffAppointmentActions({
           <div className="grid gap-2 md:grid-cols-[1fr_90px_150px]">
             <select value={standaloneProductId} onChange={(event) => setStandaloneProductId(event.target.value)} className={inputClass}>
               <option value="">Select product</option>
-              {products.map((product) => <option key={String(product.id)} value={String(product.id)}>{String(product.name)} Â· stock {String(product.stock_quantity)}</option>)}
+              {products.map((product) => <option key={String(product.id)} value={String(product.id)}>{String(product.name)} · stock {String(product.stock_quantity)}</option>)}
             </select>
             <input value={standaloneQuantity} onChange={(event) => setStandaloneQuantity(Number(event.target.value))} type="number" min={1} className={inputClass} />
             <select value={standalonePaymentMethod} onChange={(event) => setStandalonePaymentMethod(event.target.value)} className={inputClass}>
