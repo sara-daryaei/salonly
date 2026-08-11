@@ -4,7 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, PlayCircle, XCircle } from "lucide-react";
 import type { InternalAppointmentRecord } from "@/lib/internal/appointments";
-import { canTransitionAppointment, paymentMethods } from "@/lib/security-rules";
+import { canScheduleNextAppointment, canTransitionAppointment, isTerminalAppointmentStatus, paymentMethods } from "@/lib/security-rules";
 
 export function StaffAppointmentActions({
   appointment,
@@ -21,13 +21,16 @@ export function StaffAppointmentActions({
   const [busy, setBusy] = useState(false);
   const [productId, setProductId] = useState("");
   const [quantity, setQuantity] = useState(1);
+  const [standaloneProductId, setStandaloneProductId] = useState("");
+  const [standaloneQuantity, setStandaloneQuantity] = useState(1);
+  const [standalonePaymentMethod, setStandalonePaymentMethod] = useState("");
   const [nextServiceId, setNextServiceId] = useState(String(appointment.serviceId));
   const [nextDate, setNextDate] = useState("");
   const [nextSlots, setNextSlots] = useState<string[]>([]);
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [slotsError, setSlotsError] = useState("");
-  const terminal = ["completed", "cancelled", "no_show"].includes(appointment.status);
-  const canScheduleNext = ["confirmed", "in_progress", "completed", "no_show"].includes(appointment.status);
+  const terminal = isTerminalAppointmentStatus(appointment.status);
+  const canScheduleNext = canScheduleNextAppointment(appointment.status);
   const canStart = canTransitionAppointment(appointment.status, "in_progress");
   const canComplete = canTransitionAppointment(appointment.status, "completed");
   const canCancel = canTransitionAppointment(appointment.status, "cancelled");
@@ -78,6 +81,19 @@ export function StaffAppointmentActions({
       startTime: formData.get("startTime"),
       notes: formData.get("notes"),
     }, "Next appointment scheduled.");
+  }
+
+  async function sellStandaloneProduct() {
+    const ok = await post(`/api/staff/appointments/${appointment.appointmentId}/product-sales`, {
+      productId: standaloneProductId,
+      quantity: standaloneQuantity,
+      paymentMethod: standalonePaymentMethod,
+    }, "Product sale recorded.");
+    if (ok) {
+      setStandaloneProductId("");
+      setStandaloneQuantity(1);
+      setStandalonePaymentMethod("");
+    }
   }
 
   useEffect(() => {
@@ -141,9 +157,28 @@ export function StaffAppointmentActions({
             </select>
             <input value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} type="number" min={1} className={inputClass} />
           </div>
+          <p className="text-xs font-semibold text-[#64736d]">Products included here use the same payment method as the completed appointment.</p>
           <textarea name="note" placeholder="Completion note" className={inputClass} />
           <button disabled={busy} className={buttonClass}><CheckCircle2 size={16} /> Complete</button>
         </form>
+      ) : null}
+
+      {!terminal && products.length ? (
+        <div className="space-y-2 rounded-xl border border-black/10 p-3">
+          <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#6b7772]">Standalone product sale</p>
+          <div className="grid gap-2 md:grid-cols-[1fr_90px_150px]">
+            <select value={standaloneProductId} onChange={(event) => setStandaloneProductId(event.target.value)} className={inputClass}>
+              <option value="">Select product</option>
+              {products.map((product) => <option key={String(product.id)} value={String(product.id)}>{String(product.name)} Â· stock {String(product.stock_quantity)}</option>)}
+            </select>
+            <input value={standaloneQuantity} onChange={(event) => setStandaloneQuantity(Number(event.target.value))} type="number" min={1} className={inputClass} />
+            <select value={standalonePaymentMethod} onChange={(event) => setStandalonePaymentMethod(event.target.value)} className={inputClass}>
+              <option value="">Payment</option>
+              {paymentMethods.map((method) => <option key={method} value={method}>{method}</option>)}
+            </select>
+          </div>
+          <button type="button" disabled={busy || !standaloneProductId || !standalonePaymentMethod} onClick={sellStandaloneProduct} className={buttonClass}>Record product sale</button>
+        </div>
       ) : null}
 
       {canScheduleNext && services.length ? (

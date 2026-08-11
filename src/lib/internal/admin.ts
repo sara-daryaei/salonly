@@ -53,7 +53,7 @@ export async function listAdminOverview(range: DateRange) {
     `,
     db`
       select c.id::text,
-        min(a.start_at)::date as first_visit,
+        to_char(min(a.start_at at time zone 'Europe/Brussels'), 'YYYY-MM-DD') as first_visit,
         bool_or(a.start_at >= (${range.from}::date at time zone 'Europe/Brussels') and a.start_at < (((${range.to}::date + interval '1 day') at time zone 'Europe/Brussels'))) as in_period
       from customers c
       join appointments a on a.customer_id = c.id

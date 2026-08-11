@@ -29,6 +29,8 @@ async function runChecks() {
   const serviceId = "women-cut";
   const staffId = "sophie";
 
+  await verifyMigrationSchema();
+
   const beforeSlots = await getSlots(serviceId, staffId, targetDate);
   assert("Initial public availability includes target slot", beforeSlots.some((slot) => slot.time === originalSlot), beforeSlots.map((slot) => slot.time).join(", "));
 
@@ -134,6 +136,8 @@ async function runChecks() {
   `;
   assert("returning customer analytics works", Number(returningRows[0].returning_customers) >= 1, `returning=${returningRows[0].returning_customers}`);
 
+  await verifyCustomerIdentityConflictsAndRaces({ serviceId, staffId, date: settingsDate });
+
   const note = await request(`/api/staff/appointments/${appointment.id}/notes`, { method: "POST", jar: staffJar, json: { note: "E2E customer prefers quiet appointment.", customerNote: true } });
   const noteRows = await sql`select count(*)::int as count from customer_notes`;
   assert("6. Staff can add customer notes", note.status === 200 && Number(noteRows[0].count) === 1, `status=${note.status} notes=${noteRows[0].count}`);
@@ -170,6 +174,8 @@ async function runChecks() {
     json: { serviceId, staffId, date: targetDate, startTime: "10:30", firstName: "Product", lastName: "Client", email: "product@example.com", phone: "+32 470 99 88 77" },
   });
   const productAppointment = productBooking.body.appointment;
+  const missingProductPayment = await request(`/api/staff/appointments/${productAppointment.id}/product-sales`, { method: "POST", jar: staffJar, json: { productId, quantity: 1 } });
+  assert("new product sale requires real payment method", missingProductPayment.status === 400, `status=${missingProductPayment.status}`);
   const standaloneSale = await request(`/api/staff/appointments/${productAppointment.id}/product-sales`, { method: "POST", jar: staffJar, json: { productId, quantity: 1, paymentMethod: "bancontact" } });
   const completeAfterSale = await request(`/api/staff/appointments/${productAppointment.id}/complete`, { method: "POST", jar: staffJar, json: { grossAmount: 55, discount: 0, tip: 0, paymentMethod: "card", note: "", products: [] } });
   const productAfter = await sql`select stock_quantity from products where id = ${productId}`;
@@ -177,6 +183,12 @@ async function runChecks() {
   const reportsCsv = await request(`/api/admin/reports?period=custom&from=${financialDate}&to=${financialDate}`, { jar: adminJar, raw: true });
   assert("11. Product sale updates stock and reporting", standaloneSale.status === 200 && completeAfterSale.status === 200 && Number(productAfter[0].stock_quantity) === Number(productBefore[0].stock_quantity) - 1 && saleRows.length === 1 && reportsCsv.text.includes("E2E Shampoo"), `stock=${productAfter[0].stock_quantity} sales=${saleRows.length}`);
   assert("product payment method is recorded", String(saleRows[0]?.payment_method) === "bancontact", JSON.stringify(saleRows[0]));
+  await sql`
+    insert into product_sales (product_id, staff_id, customer_id, appointment_id, quantity, unit_price, total_price, payment_method, created_at)
+    values (${productId}, ${staffId}, null, null, 1, 20, 20, 'unknown', ${brusselsDateTime(financialDate, "09:00").toISOString()})
+  `;
+  const legacyRows = await sql`select payment_method from product_sales where payment_method = 'unknown'`;
+  assert("legacy product sale is not falsely classified as Card", legacyRows.length === 1, `unknown=${legacyRows.length}`);
   const totalServiceRevenueRows = await sql`select coalesce(sum(amount), 0)::numeric as revenue from transactions where payment_status = 'paid' and transaction_type = 'service'`;
   assert("11a. Product revenue does not inflate service transaction revenue", Number(totalServiceRevenueRows[0].revenue) === 105, `revenue=${totalServiceRevenueRows[0].revenue}`);
   const methodRows = await sql`
@@ -193,7 +205,7 @@ async function runChecks() {
     group by payment_method
   `;
   const methodTotals = Object.fromEntries(methodRows.map((row) => [String(row.payment_method), Number(row.total)]));
-  assert("payment-method report reconciles service + products", methodTotals.card === 105 && methodTotals.bancontact === 20, JSON.stringify(methodTotals));
+  assert("payment-method report reconciles service + products", methodTotals.card === 105 && methodTotals.bancontact === 20 && methodTotals.unknown === 20, JSON.stringify(methodTotals));
   assert("no financial double counting", Number(totalServiceRevenueRows[0].revenue) === 105 && Number(saleRows[0].total_price) === 20, `service=${totalServiceRevenueRows[0].revenue} product=${saleRows[0].total_price}`);
 
   const [customerRow] = await sql`select customer_id::text from appointments where id = ${appointment.id}`;
@@ -203,23 +215,30 @@ async function runChecks() {
   const adminAppointmentsAfterNext = await request("/admin/appointments?q=E2E", { jar: adminJar, raw: true });
   assert("11b. Schedule Next Appointment respects availability", next.status === 200 && !slotsAfterNext.some((slot) => slot.time === "15:30") && staffAppointmentsAfterNext.text.includes("15:30") && adminAppointmentsAfterNext.text.includes("15:30"), `next=${next.status}`);
   const scheduleAfterCompleteSlots = await getSlots(serviceId, staffId, settingsDate);
-  const nextAfterComplete = await request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: staffJar, json: { serviceId, date: settingsDate, startTime: "09:00", notes: "E2E next after completed." } });
+  const nextAfterComplete = await request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: staffJar, json: { serviceId, date: settingsDate, startTime: "13:00", notes: "E2E next after completed." } });
   assert("Schedule Next is available after completed appointment", nextAfterComplete.status === 200, `status=${nextAfterComplete.status}`);
-  assert("Schedule Next displays only real available slots", scheduleAfterCompleteSlots.some((slot) => slot.time === "09:00") && !scheduleAfterCompleteSlots.some((slot) => slot.time === "10:30"), scheduleAfterCompleteSlots.map((slot) => slot.time).join(", "));
+  assert("Schedule Next displays only real available slots", scheduleAfterCompleteSlots.some((slot) => slot.time === "13:00") && !scheduleAfterCompleteSlots.some((slot) => slot.time === "10:30"), scheduleAfterCompleteSlots.map((slot) => slot.time).join(", "));
+  const staffOverviewActions = await request("/staff", { jar: staffJar, raw: true });
+  const staffAppointmentsActions = await request("/staff/appointments", { jar: staffJar, raw: true });
+  const sharedActionLabels = ["Standalone product sale", "Products included here use the same payment method", "Schedule next appointment"];
+  assert("Staff Overview and Staff Appointments expose identical valid actions", sharedActionLabels.every((label) => staffOverviewActions.text.includes(label) && staffAppointmentsActions.text.includes(label)), sharedActionLabels.join(", "));
 
   const collisionA = new CookieJar();
   collisionA.cookies = new Map(staffJar.cookies);
   const collisionB = new CookieJar();
   collisionB.cookies = new Map(staffJar.cookies);
   const collisionResults = await Promise.all([
-    request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: collisionA, json: { serviceId, date: settingsDate, startTime: "13:00", notes: "E2E collision A." } }),
-    request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: collisionB, json: { serviceId, date: settingsDate, startTime: "13:00", notes: "E2E collision B." } }),
+    request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: collisionA, json: { serviceId, date: targetDate, startTime: "13:00", notes: "E2E collision A." } }),
+    request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: collisionB, json: { serviceId, date: targetDate, startTime: "13:00", notes: "E2E collision B." } }),
   ]);
   assert("schedule-next collision returns 409", collisionResults.some((item) => item.status === 200) && collisionResults.some((item) => item.status === 409), collisionResults.map((item) => item.status).join(", "));
 
   const expense = await request("/api/admin/expenses", { method: "POST", jar: adminJar, json: { category: "E2E", description: "E2E expense", supplier: "Verifier", amount: 30, expenseDate: financialDate } });
+  await createAdminCustomerAnalyticsFixtures(financialDate);
   const overviewAfterExpense = await request(`/admin?period=custom&from=${financialDate}&to=${financialDate}`, { jar: adminJar, raw: true });
   assert("12. Expense updates financial result", expense.status === 200 && overviewAfterExpense.text.includes("EUR 30"), `expenseStatus=${expense.status}`);
+  const overviewText = normalizedText(overviewAfterExpense.text);
+  assert("actual New/Returning analytics are correct", statValue(overviewText, "New customers") === "1" && statValue(overviewText, "Returning customers") === "1", `new=${statValue(overviewText, "New customers")} returning=${statValue(overviewText, "Returning customers")}`);
   const badInputs = await Promise.all([
     request(`/api/admin/services/${serviceId}`, { method: "PATCH", jar: adminJar, json: { name: "", category: "Haircuts", description: "Bad", price: 55, duration: 60, imageUrl: "", active: true, staffIds: [staffId] } }),
     request(`/api/admin/services/${serviceId}`, { method: "PATCH", jar: adminJar, json: { name: "Women's Haircut", category: "Haircuts", description: "Bad", price: 55, duration: 0, imageUrl: "", active: true, staffIds: [staffId] } }),
@@ -253,7 +272,7 @@ async function runChecks() {
     json: { schedules: [{ day: 3, start: "13:00", end: "17:00", lunchStart: "", lunchEnd: "", active: true }] },
   });
   const slotsAfterSchedule = await getSlots(serviceId, staffId, targetDate);
-  assert("15. Staff schedule changes affect public availability", schedule.status === 200 && !slotsAfterSchedule.some((slot) => slot.time === "10:30") && slotsAfterSchedule.some((slot) => slot.time === "13:00"), slotsAfterSchedule.map((slot) => slot.time).join(", "));
+  assert("15. Staff schedule changes affect public availability", schedule.status === 200 && !slotsAfterSchedule.some((slot) => slot.time === "10:30") && slotsAfterSchedule.some((slot) => slot.time === "14:00"), slotsAfterSchedule.map((slot) => slot.time).join(", "));
 
   const settings = await request("/api/admin/settings", {
     method: "PATCH",
@@ -376,6 +395,90 @@ async function verifyDatabaseFanOutRegression(date) {
   assert("service appointment count does not fan out", Number(serviceAggregate.appointment_count) === 2, JSON.stringify(serviceAggregate));
 }
 
+async function verifyMigrationSchema() {
+  const indexRows = await sql`
+    select indexname
+    from pg_indexes
+    where schemaname = current_schema()
+      and indexname in ('customers_normalized_email_idx', 'customers_normalized_phone_idx')
+  `;
+  const [paymentColumn] = await sql`
+    select column_default, is_nullable
+    from information_schema.columns
+    where table_schema = current_schema()
+      and table_name = 'product_sales'
+      and column_name = 'payment_method'
+  `;
+  const [paymentConstraint] = await sql`
+    select pg_get_constraintdef(c.oid) as definition
+    from pg_constraint c
+    join pg_class t on t.oid = c.conrelid
+    join pg_namespace n on n.oid = t.relnamespace
+    where n.nspname = current_schema()
+      and t.relname = 'product_sales'
+      and c.conname = 'product_sales_payment_method_allowed'
+  `;
+  assert("migration 007/008 schema correct", indexRows.length === 2 && paymentColumn?.is_nullable === "NO" && paymentColumn?.column_default === null && String(paymentConstraint?.definition ?? "").includes("unknown"), JSON.stringify({ indexes: indexRows, paymentColumn, paymentConstraint }));
+}
+
+async function verifyCustomerIdentityConflictsAndRaces({ serviceId, staffId, date }) {
+  const [emailCustomer] = await sql`
+    insert into customers (first_name, last_name, email, phone)
+    values ('Email', 'Match', 'identity-email@example.com', '+32 470 00 10 01')
+    returning id::text
+  `;
+  const [phoneCustomer] = await sql`
+    insert into customers (first_name, last_name, email, phone)
+    values ('Phone', 'Match', 'identity-phone@example.com', '+32 470 00 10 02')
+    returning id::text
+  `;
+  const conflictBooking = await request("/api/bookings", {
+    method: "POST",
+    json: { serviceId, staffId, date, startTime: "15:00", firstName: "Conflict", lastName: "Client", email: "identity-email@example.com", phone: "+32 470 00 10 02" },
+  });
+  const [conflictAppointment] = await sql`select customer_id::text from appointments where booking_reference = ${conflictBooking.body?.appointment?.reference ?? ""}`;
+  const [audit] = await sql`select count(*)::int as count from audit_logs where action = 'customer_identity_conflict'`;
+  assert("email/phone conflict does not merge different customers", conflictBooking.status === 201 && conflictAppointment.customer_id !== emailCustomer.id && conflictAppointment.customer_id !== phoneCustomer.id && Number(audit.count) === 1, JSON.stringify({ status: conflictBooking.status, customer: conflictAppointment?.customer_id, emailCustomer: emailCustomer.id, phoneCustomer: phoneCustomer.id, audits: audit.count }));
+
+  const raceA = request("/api/bookings", {
+    method: "POST",
+    json: { serviceId, staffId, date, startTime: "09:30", firstName: "Race", lastName: "Client", email: "Race.Customer@Example.com", phone: "+32 470 00 20 01" },
+  });
+  const raceB = request("/api/bookings", {
+    method: "POST",
+    json: { serviceId, staffId, date, startTime: "14:00", firstName: "Race", lastName: "Client", email: "race.customer@example.com", phone: "+32 470 00 20 02" },
+  });
+  const raceResults = await Promise.all([raceA, raceB]);
+  const raceRows = await sql`
+    select count(distinct c.id)::int as customers, count(a.id)::int as appointments
+    from customers c
+    join appointments a on a.customer_id = c.id
+    where lower(trim(c.email)) = 'race.customer@example.com'
+  `;
+  assert("simultaneous same-email bookings produce one customer", raceResults.every((item) => item.status === 201) && Number(raceRows[0].customers) === 1 && Number(raceRows[0].appointments) === 2, JSON.stringify({ statuses: raceResults.map((item) => item.status), row: raceRows[0] }));
+}
+
+async function createAdminCustomerAnalyticsFixtures(financialDate) {
+  const previousDate = addDays(financialDate, -14);
+  const [returningCustomer] = await sql`
+    insert into customers (first_name, last_name, email, phone)
+    values ('Returning', 'Metric', 'returning.metric@example.com', '+32 470 30 00 01')
+    returning id::text
+  `;
+  const [newCustomer] = await sql`
+    insert into customers (first_name, last_name, email, phone)
+    values ('New', 'Metric', 'new.metric@example.com', '+32 470 30 00 02')
+    returning id::text
+  `;
+  await sql`
+    insert into appointments (booking_reference, customer_id, service_id, staff_id, start_at, end_at, duration, price, status, notes)
+    values
+      ('RET-METRIC-OLD', ${returningCustomer.id}, 'men-cut', 'julien', ${brusselsDateTime(previousDate, "08:00").toISOString()}, ${brusselsDateTime(previousDate, "08:40").toISOString()}, 40, 38, 'completed', 'Returning metric old visit.'),
+      ('RET-METRIC-IN', ${returningCustomer.id}, 'men-cut', 'julien', ${brusselsDateTime(financialDate, "08:00").toISOString()}, ${brusselsDateTime(financialDate, "08:40").toISOString()}, 40, 38, 'completed', 'Returning metric in range.'),
+      ('NEW-METRIC-IN', ${newCustomer.id}, 'men-cut', 'julien', ${brusselsDateTime(financialDate, "08:45").toISOString()}, ${brusselsDateTime(financialDate, "09:25").toISOString()}, 40, 38, 'completed', 'New metric in range.')
+  `;
+}
+
 async function verifyRoutesAndMarkup(adminJar, staffJar) {
   const publicRoutes = ["/", "/services", "/team", "/gallery", "/reviews", "/about", "/contact", "/book", "/login"];
   const adminRoutes = ["/admin", "/admin/calendar", "/admin/appointments", "/admin/customers", "/admin/staff", "/admin/services", "/admin/products", "/admin/payments", "/admin/expenses", "/admin/reports", "/admin/settings"];
@@ -487,6 +590,11 @@ function splitSetCookie(value) {
 
 function normalizedText(html) {
   return html.replace(/<!--.*?-->/g, "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function statValue(text, label) {
+  const match = text.match(new RegExp(`${label}\\s+([^\\s]+)`));
+  return match?.[1] ?? "";
 }
 
 function brusselsDate(value) {

@@ -191,8 +191,9 @@ create table if not exists product_sales (
   quantity integer not null,
   unit_price numeric not null,
   total_price numeric not null,
-  payment_method text not null default 'card',
-  created_at timestamptz not null default now()
+  payment_method text not null,
+  created_at timestamptz not null default now(),
+  constraint product_sales_payment_method_allowed check (payment_method in ('cash', 'card', 'bancontact', 'online', 'other', 'unknown'))
 );
 
 create table if not exists expenses (

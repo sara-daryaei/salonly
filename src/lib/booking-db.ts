@@ -193,6 +193,9 @@ async function findOrCreateCustomer(
 ) {
   const normalizedEmail = normalizeEmail(input.email);
   const normalizedPhone = normalizePhone(input.phone);
+  const lockIdentity = normalizedEmail ? `email:${normalizedEmail}` : normalizedPhone ? `phone:${normalizedPhone}` : "";
+  if (lockIdentity) await tx`select pg_advisory_xact_lock(hashtextextended(${lockIdentity}, 0))`;
+
   const emailMatches = normalizedEmail
     ? await tx`
       select id, first_name, last_name, email, phone
@@ -202,6 +205,36 @@ async function findOrCreateCustomer(
       limit 2
     `
     : [];
+  const phoneMatches = normalizedPhone
+    ? await tx`
+      select id, first_name, last_name, email, phone
+      from customers
+      where regexp_replace(phone, '[^0-9+]', '', 'g') = ${normalizedPhone}
+      order by created_at asc
+      limit 2
+    `
+    : [];
+
+  if (emailMatches.length > 1 || phoneMatches.length > 1) {
+    await recordCustomerIdentityAudit(tx, "customer_identity_ambiguous", null, {
+      normalizedEmail,
+      normalizedPhone,
+      emailMatches: emailMatches.map((row) => String(row.id)),
+      phoneMatches: phoneMatches.map((row) => String(row.id)),
+    });
+    return createCustomer(tx, input, normalizedEmail);
+  }
+
+  if (emailMatches.length === 1 && phoneMatches.length === 1 && String(emailMatches[0].id) !== String(phoneMatches[0].id)) {
+    await recordCustomerIdentityAudit(tx, "customer_identity_conflict", null, {
+      normalizedEmail,
+      normalizedPhone,
+      emailCustomerId: String(emailMatches[0].id),
+      phoneCustomerId: String(phoneMatches[0].id),
+    });
+    return createCustomer(tx, input, normalizedEmail);
+  }
+
   if (emailMatches.length === 1) {
     const [customer] = emailMatches;
     await tx`
@@ -214,16 +247,7 @@ async function findOrCreateCustomer(
     return customer;
   }
 
-  const phoneMatches = normalizedPhone
-    ? await tx`
-      select id, first_name, last_name, email, phone
-      from customers
-      where regexp_replace(phone, '[^0-9+]', '', 'g') = ${normalizedPhone}
-      order by created_at asc
-      limit 2
-    `
-    : [];
-  if (!emailMatches.length && phoneMatches.length === 1) {
+  if (phoneMatches.length === 1) {
     const [customer] = phoneMatches;
     await tx`
       update customers
@@ -236,12 +260,23 @@ async function findOrCreateCustomer(
     return customer;
   }
 
+  return createCustomer(tx, input, normalizedEmail);
+}
+
+async function createCustomer(tx: TransactionSql<Record<string, never>>, input: { firstName: string; lastName: string; email: string; phone: string }, normalizedEmail: string) {
   const rows = await tx`
     insert into customers (first_name, last_name, email, phone)
     values (${input.firstName.trim()}, ${input.lastName.trim()}, ${normalizedEmail || input.email.trim()}, ${input.phone.trim()})
     returning id
   `;
   return rows[0];
+}
+
+async function recordCustomerIdentityAudit(tx: TransactionSql<Record<string, never>>, action: string, entityId: string | null, metadata: Record<string, unknown>) {
+  await tx`
+    insert into audit_logs (action, entity_type, entity_id, metadata)
+    values (${action}, 'customer', ${entityId}, ${JSON.stringify(metadata)})
+  `;
 }
 
 function normalizeEmail(email: string) {
