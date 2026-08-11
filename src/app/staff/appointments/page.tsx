@@ -15,6 +15,10 @@ export default async function StaffAppointmentsPage({ searchParams }: { searchPa
     listAdminServices(),
   ]);
   const paidAppointmentIds = new Set(transactions.filter((transaction) => transaction.transaction_type === "service").map((transaction) => String(transaction.appointment_id)));
+  const staffServices = services.filter((service) => {
+    const staffIds = Array.isArray(service.staff_ids) ? service.staff_ids.map(String) : [];
+    return Boolean(service.active) && staffIds.includes(session.staffId!);
+  });
   return (
     <>
       <form className="border-b border-black/10 bg-white px-5 py-4 lg:px-8">
@@ -36,7 +40,7 @@ export default async function StaffAppointmentsPage({ searchParams }: { searchPa
               <p className="mt-1 text-sm text-[#64736d]">{row.date} - {row.start}-{row.end} - {row.status.replace("_", " ")} - {paidAppointmentIds.has(row.appointmentId) ? "Paid" : "Open"}</p>
               {row.notes ? <p className="mt-2 text-sm">{row.notes}</p> : null}
             </div>
-            <StaffAppointmentActions appointment={row} products={products as unknown as Record<string, unknown>[]} services={services as unknown as Record<string, unknown>[]} />
+            <StaffAppointmentActions appointment={row} products={products as unknown as Record<string, unknown>[]} services={staffServices as unknown as Record<string, unknown>[]} />
           </article>
         )) : <p className="rounded-2xl border border-dashed border-black/15 bg-white p-5 text-sm font-semibold text-[#64736d]">No appointments assigned to you.</p>}
       </div>

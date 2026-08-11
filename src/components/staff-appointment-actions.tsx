@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, PlayCircle, XCircle } from "lucide-react";
 import type { InternalAppointmentRecord } from "@/lib/internal/appointments";
-import { paymentMethods } from "@/lib/security-rules";
+import { canTransitionAppointment, paymentMethods } from "@/lib/security-rules";
 
 export function StaffAppointmentActions({
   appointment,
@@ -22,6 +22,10 @@ export function StaffAppointmentActions({
   const [productId, setProductId] = useState("");
   const [quantity, setQuantity] = useState(1);
   const terminal = ["completed", "cancelled", "no_show"].includes(appointment.status);
+  const canStart = canTransitionAppointment(appointment.status, "in_progress");
+  const canComplete = canTransitionAppointment(appointment.status, "completed");
+  const canCancel = canTransitionAppointment(appointment.status, "cancelled");
+  const canNoShow = canTransitionAppointment(appointment.status, "no_show");
 
   async function post(path: string, body: Record<string, unknown>, success: string) {
     setBusy(true);
@@ -74,9 +78,9 @@ export function StaffAppointmentActions({
     <div className="space-y-4">
       {!terminal ? (
         <div className="grid gap-2 md:grid-cols-3">
-          <button disabled={busy || appointment.status !== "confirmed"} onClick={() => post(`/api/staff/appointments/${appointment.appointmentId}/start`, {}, "Appointment started.")} className={buttonClass}><PlayCircle size={16} /> Start</button>
-          <button disabled={busy} onClick={() => post(`/api/staff/appointments/${appointment.appointmentId}/status`, { status: "no_show" }, "Marked no-show.")} className={buttonClass}><XCircle size={16} /> No show</button>
-          <button disabled={busy} onClick={() => post(`/api/staff/appointments/${appointment.appointmentId}/status`, { status: "cancelled" }, "Appointment cancelled.")} className={buttonClass}>Cancel</button>
+          <button disabled={busy || !canStart} onClick={() => post(`/api/staff/appointments/${appointment.appointmentId}/start`, {}, "Appointment started.")} className={buttonClass}><PlayCircle size={16} /> Start</button>
+          <button disabled={busy || !canNoShow} onClick={() => post(`/api/staff/appointments/${appointment.appointmentId}/status`, { status: "no_show" }, "Marked no-show.")} className={buttonClass}><XCircle size={16} /> No show</button>
+          <button disabled={busy || !canCancel} onClick={() => post(`/api/staff/appointments/${appointment.appointmentId}/status`, { status: "cancelled" }, "Appointment cancelled.")} className={buttonClass}>Cancel</button>
         </div>
       ) : null}
 
@@ -88,7 +92,7 @@ export function StaffAppointmentActions({
         </form>
       ) : null}
 
-      {!terminal ? (
+      {canComplete ? (
         <form action={complete} className="space-y-2 rounded-xl border border-black/10 p-3">
           <div className="grid gap-2 md:grid-cols-4">
             <input name="grossAmount" type="number" step="0.01" defaultValue={appointment.price} className={inputClass} />
@@ -108,7 +112,7 @@ export function StaffAppointmentActions({
         </form>
       ) : null}
 
-      {!terminal ? (
+      {!terminal && services.length ? (
         <form action={scheduleNext} className="space-y-2 rounded-xl border border-black/10 p-3">
           <p className="text-xs font-bold uppercase tracking-[0.14em] text-[#6b7772]">Schedule next appointment</p>
           <div className="grid gap-2 md:grid-cols-3">

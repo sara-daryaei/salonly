@@ -20,7 +20,9 @@ let server;
 let serverOutput = "";
 
 async function runChecks() {
-  const targetDate = "2026-08-12";
+  const targetDate = nextWeekdayDate(3, 7);
+  const settingsDate = nextWeekdayDate(3, 14);
+  const farDate = addDays(brusselsDate(new Date()), 91);
   const financialDate = brusselsDate(new Date());
   const originalSlot = "09:00";
   const rescheduledSlot = "14:00";
@@ -29,6 +31,15 @@ async function runChecks() {
 
   const beforeSlots = await getSlots(serviceId, staffId, targetDate);
   assert("Initial public availability includes target slot", beforeSlots.some((slot) => slot.time === originalSlot), beforeSlots.map((slot) => slot.time).join(", "));
+
+  const pendingAppointmentId = await createDirectAppointment({ date: targetDate, startTime: "16:00", endTime: "17:00", status: "pending", customerEmail: "pending@example.com" });
+  const pendingComplete = await request(`/api/staff/appointments/${pendingAppointmentId}/complete`, {
+    method: "POST",
+    jar: await login("staff@maisonelegance.be", "staff123"),
+    json: { grossAmount: 55, discount: 0, tip: 0, paymentMethod: "card", note: "", products: [] },
+  });
+  assert("pending cannot complete directly", pendingComplete.status === 409 || pendingComplete.status === 400, `status=${pendingComplete.status}`);
+  await sql`update appointments set status = 'cancelled' where id = ${pendingAppointmentId}`;
 
   const booking = await request("/api/bookings", {
     method: "POST",
@@ -68,6 +79,30 @@ async function runChecks() {
 
   const start = await request(`/api/staff/appointments/${appointment.id}/start`, { method: "POST", jar: staffJar, json: {} });
   assert("5. Staff can start the appointment", start.status === 200, JSON.stringify(start.body));
+
+  const inProgressBlockId = await createDirectAppointment({ date: settingsDate, startTime: "14:00", endTime: "15:00", status: "in_progress", customerEmail: "in-progress@example.com" });
+  const slotsWithInProgress = await getSlots(serviceId, staffId, settingsDate);
+  assert("in_progress blocks availability", !slotsWithInProgress.some((slot) => slot.time === "14:00" || slot.time === "14:30"), slotsWithInProgress.map((slot) => slot.time).join(", "));
+  await sql`update appointments set status = 'cancelled' where id = ${inProgressBlockId}`;
+
+  await sql`insert into staff_time_off (staff_id, starts_at, ends_at, reason) values (${staffId}, ${brusselsDateTime(settingsDate, "15:00").toISOString()}, ${brusselsDateTime(settingsDate, "16:00").toISOString()}, 'E2E partial time off')`;
+  const slotsWithPartialTimeOff = await getSlots(serviceId, staffId, settingsDate);
+  assert("partial time off blocks only its time range", slotsWithPartialTimeOff.some((slot) => slot.time === "14:00") && !slotsWithPartialTimeOff.some((slot) => slot.time === "15:00" || slot.time === "15:30") && slotsWithPartialTimeOff.some((slot) => slot.time === "16:00"), slotsWithPartialTimeOff.map((slot) => slot.time).join(", "));
+  await sql`delete from staff_time_off where staff_id = ${staffId} and reason = 'E2E partial time off'`;
+
+  await sql`update salon_settings set appointment_slot_interval_minutes = 15 where id = 'maison-elegance'`;
+  const fifteenMinuteSlots = await getSlots(serviceId, staffId, settingsDate);
+  assert("slot interval setting changes generated slots", fifteenMinuteSlots.some((slot) => slot.time === "09:15" || slot.time === "09:45"), fifteenMinuteSlots.map((slot) => slot.time).join(", "));
+
+  const noticeMinutes = Math.ceil((brusselsDateTime(settingsDate, "09:00").getTime() - Date.now()) / 60000) + 30;
+  await sql`update salon_settings set minimum_booking_notice_minutes = ${noticeMinutes}, appointment_slot_interval_minutes = 30 where id = 'maison-elegance'`;
+  const slotsWithNotice = await getSlots(serviceId, staffId, settingsDate);
+  assert("minimum booking notice works", !slotsWithNotice.some((slot) => slot.time === "09:00"), slotsWithNotice.map((slot) => slot.time).join(", "));
+
+  await sql`update salon_settings set minimum_booking_notice_minutes = 120, maximum_booking_period_days = 30 where id = 'maison-elegance'`;
+  const slotsBeyondMaximum = await getSlots(serviceId, staffId, farDate);
+  assert("maximum booking period works", slotsBeyondMaximum.length === 0, slotsBeyondMaximum.map((slot) => slot.time).join(", "));
+  await sql`update salon_settings set minimum_booking_notice_minutes = 120, maximum_booking_period_days = 90, appointment_slot_interval_minutes = 30 where id = 'maison-elegance'`;
 
   const note = await request(`/api/staff/appointments/${appointment.id}/notes`, { method: "POST", jar: staffJar, json: { note: "E2E customer prefers quiet appointment.", customerNote: true } });
   const noteRows = await sql`select count(*)::int as count from customer_notes`;
@@ -120,6 +155,16 @@ async function runChecks() {
   const staffAppointmentsAfterNext = await request("/staff/appointments", { jar: staffJar, raw: true });
   const adminAppointmentsAfterNext = await request("/admin/appointments?q=E2E", { jar: adminJar, raw: true });
   assert("11b. Schedule Next Appointment respects availability", next.status === 200 && !slotsAfterNext.some((slot) => slot.time === "15:30") && staffAppointmentsAfterNext.text.includes("15:30") && adminAppointmentsAfterNext.text.includes("15:30"), `next=${next.status}`);
+
+  const collisionA = new CookieJar();
+  collisionA.cookies = new Map(staffJar.cookies);
+  const collisionB = new CookieJar();
+  collisionB.cookies = new Map(staffJar.cookies);
+  const collisionResults = await Promise.all([
+    request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: collisionA, json: { serviceId, date: settingsDate, startTime: "13:00", notes: "E2E collision A." } }),
+    request(`/api/staff/customers/${customerRow.customer_id}/appointments`, { method: "POST", jar: collisionB, json: { serviceId, date: settingsDate, startTime: "13:00", notes: "E2E collision B." } }),
+  ]);
+  assert("schedule-next collision returns 409", collisionResults.some((item) => item.status === 200) && collisionResults.some((item) => item.status === 409), collisionResults.map((item) => item.status).join(", "));
 
   const expense = await request("/api/admin/expenses", { method: "POST", jar: adminJar, json: { category: "E2E", description: "E2E expense", supplier: "Verifier", amount: 100, expenseDate: financialDate } });
   const overviewAfterExpense = await request(`/admin?period=custom&from=${financialDate}&to=${financialDate}`, { jar: adminJar, raw: true });
@@ -196,7 +241,80 @@ async function runChecks() {
   assert("20b. Logout works from Admin", [302, 303, 307].includes(adminLogout.status) && [302, 307].includes(adminAfterLogout.status), `logout=${adminLogout.status} after=${adminAfterLogout.status}`);
   assert("20c. Logout works from Staff", [302, 303, 307].includes(staffLogout.status) && [302, 307].includes(staffAfterLogout.status), `logout=${staffLogout.status} after=${staffAfterLogout.status}`);
 
+  await verifyDatabaseFanOutRegression(settingsDate);
   await verifyRoutesAndMarkup(adminJar, staffJar);
+}
+
+async function verifyDatabaseFanOutRegression(date) {
+  const [customer] = await sql`
+    insert into customers (first_name, last_name, email, phone)
+    values ('Fanout', 'Customer', 'fanout.customer@example.com', '+32 470 00 00 01')
+    returning id::text
+  `;
+  const firstStart = brusselsDateTime(date, "09:00");
+  const secondStart = brusselsDateTime(date, "10:30");
+  const firstEnd = brusselsDateTime(date, "10:00");
+  const secondEnd = brusselsDateTime(date, "11:30");
+  const fanoutAppointments = await sql`
+    insert into appointments (booking_reference, customer_id, service_id, staff_id, start_at, end_at, duration, price, status, notes)
+    values
+      ('FANOUT-C1', ${customer.id}, 'women-cut', 'julien', ${firstStart.toISOString()}, ${firstEnd.toISOString()}, 60, 55, 'completed', 'Fanout regression.'),
+      ('FANOUT-C2', ${customer.id}, 'women-cut', 'julien', ${secondStart.toISOString()}, ${secondEnd.toISOString()}, 60, 55, 'completed', 'Fanout regression.')
+    returning id::text
+  `;
+  await sql`
+    insert into transactions (appointment_id, customer_id, staff_id, amount, discount, tip, payment_method, payment_status, transaction_type)
+    values
+      (${fanoutAppointments[0].id}, ${customer.id}, 'julien', 40, 0, 4, 'card', 'paid', 'service'),
+      (${fanoutAppointments[1].id}, ${customer.id}, 'julien', 60, 0, 6, 'card', 'paid', 'service')
+  `;
+  const [customerAggregate] = await sql`
+    with appointment_stats as (
+      select customer_id, count(*)::int as appointments
+      from appointments
+      where customer_id = ${customer.id}
+      group by customer_id
+    ),
+    transaction_stats as (
+      select customer_id, coalesce(sum(amount), 0)::numeric as service_spend
+      from transactions
+      where customer_id = ${customer.id} and payment_status = 'paid' and transaction_type = 'service'
+      group by customer_id
+    )
+    select coalesce(a.appointments, 0)::int as appointments, coalesce(t.service_spend, 0)::numeric as service_spend
+    from customers c
+    left join appointment_stats a on a.customer_id = c.id
+    left join transaction_stats t on t.customer_id = c.id
+    where c.id = ${customer.id}
+  `;
+  assert("customer aggregation does not fan out", Number(customerAggregate.appointments) === 2 && Number(customerAggregate.service_spend) === 100, JSON.stringify(customerAggregate));
+
+  await sql`
+    insert into staff (id, first_name, last_name, job_title, bio, phone, email, languages, specialties, active)
+    values ('fanout-staff', 'Fanout', 'Staff', 'Stylist', 'Regression staff.', '+32 470 00 00 02', 'fanout.staff@example.com', array['English'], array['Cuts'], true)
+  `;
+  await sql`insert into services (id, name, category, description, price, duration, active) values ('fanout-service', 'Fanout Service', 'Haircuts', 'Regression service.', 50, 45, true)`;
+  await sql`insert into staff_services (staff_id, service_id) values ('sophie', 'fanout-service'), ('julien', 'fanout-service'), ('fanout-staff', 'fanout-service')`;
+  const [serviceCustomer] = await sql`
+    insert into customers (first_name, last_name, email, phone)
+    values ('Fanout', 'Service', 'fanout.service@example.com', '+32 470 00 00 03')
+    returning id::text
+  `;
+  await sql`
+    insert into appointments (booking_reference, customer_id, service_id, staff_id, start_at, end_at, duration, price, status, notes)
+    values
+      ('FANOUT-S1', ${serviceCustomer.id}, 'fanout-service', 'julien', ${brusselsDateTime(date, "13:00").toISOString()}, ${brusselsDateTime(date, "13:45").toISOString()}, 45, 50, 'completed', 'Fanout regression.'),
+      ('FANOUT-S2', ${serviceCustomer.id}, 'fanout-service', 'julien', ${brusselsDateTime(date, "15:00").toISOString()}, ${brusselsDateTime(date, "15:45").toISOString()}, 45, 50, 'completed', 'Fanout regression.')
+  `;
+  const [serviceAggregate] = await sql`
+    select s.id::text, count(distinct a.id)::int as appointment_count
+    from services s
+    left join staff_services ss on ss.service_id = s.id
+    left join appointments a on a.service_id = s.id
+    where s.id = 'fanout-service'
+    group by s.id
+  `;
+  assert("service appointment count does not fan out", Number(serviceAggregate.appointment_count) === 2, JSON.stringify(serviceAggregate));
 }
 
 async function verifyRoutesAndMarkup(adminJar, staffJar) {
@@ -224,6 +342,20 @@ async function getSlots(serviceId, staffId, date) {
   const response = await request(`/api/availability/times?serviceId=${serviceId}&staffId=${staffId}&date=${date}`);
   if (response.status !== 200) return [];
   return response.body.slots ?? [];
+}
+
+async function createDirectAppointment({ date, startTime, endTime, status, customerEmail, serviceId = "women-cut", staffId = "sophie" }) {
+  const [customer] = await sql`
+    insert into customers (first_name, last_name, email, phone)
+    values ('Direct', 'Appointment', ${customerEmail}, '+32 470 12 00 00')
+    returning id::text
+  `;
+  const [appointment] = await sql`
+    insert into appointments (booking_reference, customer_id, service_id, staff_id, start_at, end_at, duration, price, status, notes)
+    values (${`DIRECT-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`}, ${customer.id}, ${serviceId}, ${staffId}, ${brusselsDateTime(date, startTime).toISOString()}, ${brusselsDateTime(date, endTime).toISOString()}, 60, 55, ${status}, 'E2E direct appointment.')
+    returning id::text
+  `;
+  return appointment.id;
 }
 
 async function login(email, password, expectSuccess = true) {
@@ -309,6 +441,42 @@ function brusselsDate(value) {
   return `${part("year")}-${part("month")}-${part("day")}`;
 }
 
+function nextWeekdayDate(dayOfWeek, minimumDaysAhead) {
+  const now = new Date();
+  for (let offset = minimumDaysAhead; offset < minimumDaysAhead + 21; offset += 1) {
+    const candidate = new Date(now);
+    candidate.setUTCDate(candidate.getUTCDate() + offset);
+    const date = brusselsDate(candidate);
+    const localDay = new Date(`${date}T00:00:00`).getDay();
+    if (localDay === dayOfWeek) return date;
+  }
+  throw new Error(`Unable to find weekday ${dayOfWeek}`);
+}
+
+function addDays(date, days) {
+  const parsed = brusselsDateTime(date, "12:00");
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return brusselsDate(parsed);
+}
+
+function brusselsDateTime(date, time) {
+  const offset = getBrusselsOffset(date, time);
+  return new Date(`${date}T${time}:00${offset}`);
+}
+
+function getBrusselsOffset(date, time) {
+  const probe = new Date(`${date}T${time}:00Z`);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Europe/Brussels",
+    timeZoneName: "shortOffset",
+    hour: "2-digit",
+  }).formatToParts(probe);
+  const offsetName = parts.find((part) => part.type === "timeZoneName")?.value ?? "GMT+1";
+  const match = offsetName.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+  if (!match) return "+01:00";
+  return `${match[1]}${match[2].padStart(2, "0")}:${match[3] ?? "00"}`;
+}
+
 function assert(name, condition, detail = "") {
   results.push({ name, status: condition ? "PASS" : "FAIL", detail: condition ? "" : detail });
   console.log(`${condition ? "PASS" : "FAIL"}: ${name}${condition || !detail ? "" : ` -- ${detail}`}`);
@@ -321,6 +489,7 @@ function printResults() {
 }
 
 async function startServer() {
+  const readinessDate = nextWeekdayDate(3, 7);
   const child = spawn(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "start", "--", "--port", String(port), "--hostname", "127.0.0.1"], {
     cwd: process.cwd(),
     env: { ...process.env, POSTGRES_URL: appUrl, DATABASE_URL: "", INTERNAL_AUTH_SECRET: "e2e-functional-secret" },
@@ -332,7 +501,7 @@ async function startServer() {
   for (let attempt = 0; attempt < 80; attempt += 1) {
     await delay(500);
     try {
-      const response = await fetchWithTimeout(`${baseUrl}/api/availability/times?serviceId=women-cut&staffId=sophie&date=2026-08-12`, {}, 3000);
+      const response = await fetchWithTimeout(`${baseUrl}/api/availability/times?serviceId=women-cut&staffId=sophie&date=${readinessDate}`, {}, 3000);
       if (response.status === 200) return child;
     } catch {}
     if (child.exitCode !== null) throw new Error(`Server exited early: ${serverOutput.slice(-2000)}`);

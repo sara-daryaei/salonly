@@ -9,11 +9,17 @@ export const staffStatusTransitions: Record<AppointmentStatus, AppointmentStatus
   no_show: [],
 };
 
+export const blockingAppointmentStatuses = ["pending", "confirmed", "in_progress"] as const satisfies AppointmentStatus[];
+
 export const paymentMethods = ["cash", "card", "bancontact", "online", "other"] as const;
 export type PaymentMethod = (typeof paymentMethods)[number];
 
 export function canTransitionAppointment(from: AppointmentStatus, to: AppointmentStatus) {
   return staffStatusTransitions[from]?.includes(to) ?? false;
+}
+
+export function blocksAppointmentAvailability(status: AppointmentStatus) {
+  return blockingAppointmentStatuses.some((item) => item === status);
 }
 
 export function validatePaymentInput(input: { grossAmount?: unknown; amount?: unknown; discount: unknown; tip: unknown; paymentMethod: unknown }) {

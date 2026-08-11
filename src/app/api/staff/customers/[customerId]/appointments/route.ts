@@ -1,4 +1,5 @@
 import { apiError, apiOk } from "@/lib/api-response";
+import { AppointmentConflictError } from "@/lib/booking-db";
 import { getInternalSession } from "@/lib/internal-auth";
 import { ForbiddenError, scheduleStaffNextAppointment, validateInternalSession, ValidationError } from "@/lib/internal-db";
 
@@ -19,6 +20,7 @@ export async function POST(request: Request, context: { params: Promise<{ custom
     });
     return apiOk();
   } catch (error) {
+    if (error instanceof AppointmentConflictError) return apiError("This appointment time is no longer available.", 409);
     if (error instanceof ValidationError) return apiError(error.message, 400);
     if (error instanceof ForbiddenError) return apiError("Forbidden.", 403);
     console.error(error);

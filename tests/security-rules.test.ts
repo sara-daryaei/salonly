@@ -6,6 +6,7 @@ import { mergeStaffReportingRows } from "../src/lib/reporting";
 
 test("staff appointment status transitions are restricted", () => {
   assert.equal(canTransitionAppointment("pending", "confirmed"), true);
+  assert.equal(canTransitionAppointment("pending", "completed"), false);
   assert.equal(canTransitionAppointment("confirmed", "in_progress"), true);
   assert.equal(canTransitionAppointment("in_progress", "completed"), true);
   assert.equal(canTransitionAppointment("confirmed", "completed"), true);

@@ -1,10 +1,9 @@
 import { hasDatabase, requireDatabase } from "@/lib/db";
 import { brusselsParts } from "@/lib/time";
+import { blockingAppointmentStatuses, blocksAppointmentAvailability } from "@/lib/security-rules";
 import type { Appointment, Service, Staff } from "@/lib/salon-data";
 
 export { hasDatabase };
-
-const slotIntervalMinutes = 30;
 export async function getDatabaseAppointments() {
   const db = requireDatabase();
   const rows = await db`
@@ -149,16 +148,17 @@ export async function validateDatabaseBookingRequest(input: {
 export async function getDatabaseAvailability(input: { serviceId: string; staffId?: string; date: string }) {
   const service = await getDatabaseService(input.serviceId);
   const dayOfWeek = parseLocalDate(input.date).getDay();
-  const salonWindows = await getSalonOpeningWindows(dayOfWeek);
-  if (!service || input.date < brusselsParts().date || !salonWindows.length) return { availableSlots: [], assignableStaffBySlot: {} as Record<string, string> };
+  const [settings, salonWindows] = await Promise.all([getBookingSettings(), getSalonOpeningWindows(dayOfWeek)]);
+  if (!service || !isWithinBookingWindow(input.date, settings) || !salonWindows.length) return { availableSlots: [], assignableStaffBySlot: {} as Record<string, string> };
 
   const candidates = await getDatabaseCapableStaff(input.serviceId, input.staffId);
   const appointments = await getDatabaseAppointmentsForDate(input.date);
+  const timeOffByStaff = await getStaffTimeOffWindows(candidates.map((person) => person.id), input.date);
   const assignableStaffBySlot: Record<string, string> = {};
   const allSlots = new Set<string>();
 
   for (const person of candidates) {
-    const slots = await getStaffSlots(person, service.duration, input.date, salonWindows, appointments);
+    const slots = await getStaffSlots(person, service.duration, input.date, salonWindows, appointments, timeOffByStaff.get(person.id) ?? [], settings);
     for (const slot of slots) {
       allSlots.add(slot);
       assignableStaffBySlot[slot] ??= person.id;
@@ -259,7 +259,7 @@ async function getDatabaseAppointmentsForDate(date: string) {
     from appointments
     where start_at >= ${start.toISOString()}
       and start_at <= ${end.toISOString()}
-      and status in ('pending', 'confirmed', 'in_progress')
+      and status = any(${blockingAppointmentStatuses}::appointment_status[])
   `;
   return rows.map((row) => {
     const startParts = brusselsParts(new Date(row.start_at as Date));
@@ -302,18 +302,25 @@ async function getSalonOpeningWindows(dayOfWeek: number) {
   }));
 }
 
-async function hasTimeOff(staffId: string, date: string) {
+async function getStaffTimeOffWindows(staffIds: string[], date: string) {
+  if (!staffIds.length) return new Map<string, { start: string; end: string }[]>();
   const db = requireDatabase();
   const start = brusselsDateTimeToUtc(date, "00:00");
   const end = brusselsDateTimeToUtc(date, "23:59");
   const rows = await db`
-    select id
+    select staff_id, starts_at, ends_at
     from staff_time_off
-    where staff_id = ${staffId}
+    where staff_id = any(${staffIds})
       and tstzrange(starts_at, ends_at, '[)') && tstzrange(${start.toISOString()}, ${end.toISOString()}, '[)')
-    limit 1
   `;
-  return Boolean(rows[0]);
+  const byStaff = new Map<string, { start: string; end: string }[]>();
+  for (const row of rows) {
+    const staffId = String(row.staff_id);
+    const windows = byStaff.get(staffId) ?? [];
+    windows.push({ start: brusselsParts(new Date(row.starts_at as Date)).time, end: brusselsParts(new Date(row.ends_at as Date)).time });
+    byStaff.set(staffId, windows);
+  }
+  return byStaff;
 }
 
 async function getStaffSlots(
@@ -322,9 +329,10 @@ async function getStaffSlots(
   date: string,
   salonWindows: { start: string; end: string }[],
   appointmentSource: Pick<Appointment, "staffId" | "date" | "start" | "end" | "status">[],
+  timeOffWindows: { start: string; end: string }[],
+  settings: BookingSettings,
 ) {
   const dayOfWeek = parseLocalDate(date).getDay();
-  if (await hasTimeOff(person.id, date)) return [];
   const workingWindows = await getWorkingHours(person.id, dayOfWeek);
   const slots: string[] = [];
 
@@ -336,13 +344,15 @@ async function getStaffSlots(
       const windowEnd = Math.min(staffEnd, timeToMinutes(salonWindow.end));
       const lunch = window.lunch_start && window.lunch_end ? `${String(window.lunch_start).slice(0, 5)}-${String(window.lunch_end).slice(0, 5)}` : null;
 
-      for (let start = windowStart; start + duration <= windowEnd; start += slotIntervalMinutes) {
+      for (let start = windowStart; start + duration <= windowEnd; start += settings.slotIntervalMinutes) {
         const end = start + duration;
         const startTime = minutesToTime(start);
         const endTime = minutesToTime(end);
         const overlapsLunch = lunch ? start < rangeEnd(lunch) && end > rangeStart(lunch) : false;
         const overlapsAppointment = appointmentSource.some((appointment) => hasConflict(appointment, date, startTime, endTime, person.id));
-        if (!overlapsLunch && !overlapsAppointment) slots.push(startTime);
+        const overlapsTimeOff = timeOffWindows.some((timeOff) => rangesOverlap(start, end, timeToMinutes(timeOff.start), timeToMinutes(timeOff.end)));
+        const startsAfterNotice = brusselsDateTimeToUtc(date, startTime).getTime() >= settings.minimumStartAt.getTime();
+        if (!overlapsLunch && !overlapsAppointment && !overlapsTimeOff && startsAfterNotice) slots.push(startTime);
       }
     }
   }
@@ -376,12 +386,57 @@ function mapAppointmentRow(row: Record<string, unknown>): Appointment {
 
 function hasConflict(appointment: Pick<Appointment, "staffId" | "date" | "start" | "end" | "status">, date: string, start: string, end: string, staffId: string) {
   if (appointment.staffId !== staffId || appointment.date !== date) return false;
-  if (!["pending", "confirmed"].includes(appointment.status)) return false;
+  if (!blocksAppointmentAvailability(appointment.status)) return false;
   const requestedStart = timeToMinutes(start);
   const requestedEnd = timeToMinutes(end);
   const existingStart = timeToMinutes(appointment.start);
   const existingEnd = timeToMinutes(appointment.end);
-  return requestedStart < existingEnd && requestedEnd > existingStart;
+  return rangesOverlap(requestedStart, requestedEnd, existingStart, existingEnd);
+}
+
+type BookingSettings = {
+  minimumStartAt: Date;
+  maximumDate: string;
+  slotIntervalMinutes: number;
+};
+
+async function getBookingSettings(): Promise<BookingSettings> {
+  const db = requireDatabase();
+  const rows = await db`
+    select minimum_booking_notice_minutes, maximum_booking_period_days, appointment_slot_interval_minutes
+    from salon_settings
+    where id = 'maison-elegance'
+    limit 1
+  `;
+  const row = rows[0] ?? {};
+  const notice = positiveOrDefault(row.minimum_booking_notice_minutes, 120, true);
+  const period = positiveOrDefault(row.maximum_booking_period_days, 90);
+  const interval = positiveOrDefault(row.appointment_slot_interval_minutes, 30);
+  const now = new Date();
+  const minimumStartAt = new Date(now.getTime() + notice * 60000);
+  const maximumDate = addBrusselsDays(brusselsParts(now).date, period);
+  return { minimumStartAt, maximumDate, slotIntervalMinutes: interval };
+}
+
+function isWithinBookingWindow(date: string, settings: BookingSettings) {
+  const today = brusselsParts().date;
+  return date >= today && date <= settings.maximumDate;
+}
+
+function positiveOrDefault(value: unknown, fallback: number, allowZero = false) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0 || (!allowZero && parsed <= 0)) return fallback;
+  return Math.trunc(parsed);
+}
+
+function addBrusselsDays(date: string, days: number) {
+  const parsed = brusselsDateTimeToUtc(date, "12:00");
+  parsed.setUTCDate(parsed.getUTCDate() + days);
+  return brusselsParts(parsed).date;
+}
+
+function rangesOverlap(start: number, end: number, existingStart: number, existingEnd: number) {
+  return start < existingEnd && end > existingStart;
 }
 
 function parseLocalDate(date: string) {

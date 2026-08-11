@@ -420,24 +420,52 @@ export async function addStaffTimeOff(actor: InternalSession, staffId: string, b
 
 export async function updateSalonSettings(actor: InternalSession, body: Record<string, unknown>) {
   const db = requireDatabase();
+  const settings = validateSalonSettings(body);
   await db.begin(async (tx) => {
     await tx`
-      update salon_settings set salon_name = ${text(body.salonName)}, address = ${text(body.address)}, phone = ${text(body.phone)}, email = ${text(body.email)},
-        minimum_booking_notice_minutes = ${int(body.bookingNotice)}, maximum_booking_period_days = ${int(body.maximumBookingPeriod)},
-        cancellation_deadline_hours = ${int(body.cancellationDeadline)}, appointment_slot_interval_minutes = ${int(body.slotInterval)}, updated_at = now()
+      update salon_settings set salon_name = ${settings.salonName}, address = ${settings.address}, phone = ${settings.phone}, email = ${settings.email},
+        minimum_booking_notice_minutes = ${settings.bookingNotice}, maximum_booking_period_days = ${settings.maximumBookingPeriod},
+        cancellation_deadline_hours = ${settings.cancellationDeadline}, appointment_slot_interval_minutes = ${settings.slotInterval}, updated_at = now()
       where id = 'maison-elegance'
     `;
-    for (const row of (body.openingHours as Record<string, unknown>[] | undefined) ?? []) {
-      const active = Boolean(row.active);
+    for (const row of settings.openingHours) {
       await tx`
         insert into salon_opening_hours (day_of_week, active, open_time, close_time, updated_at)
-        values (${int(row.day)}, ${active}, ${active ? text(row.open) : null}, ${active ? text(row.close) : null}, now())
+        values (${row.day}, ${row.active}, ${row.open}, ${row.close}, now())
         on conflict (day_of_week) do update set active = excluded.active, open_time = excluded.open_time, close_time = excluded.close_time, updated_at = now()
       `;
     }
     await tx`insert into audit_logs (user_id, action, entity_type, entity_id, metadata) values (${actor.profileId}, 'settings_updated', 'salon_settings', 'maison-elegance', '{}'::jsonb)`;
   });
   refreshAdmin();
+}
+
+function validateSalonSettings(body: Record<string, unknown>) {
+  const bookingNotice = boundedInteger(body.bookingNotice, "Minimum booking notice", { min: 0 });
+  const maximumBookingPeriod = boundedInteger(body.maximumBookingPeriod, "Maximum booking period", { min: 1 });
+  const cancellationDeadline = boundedInteger(body.cancellationDeadline, "Cancellation deadline", { min: 0 });
+  const slotInterval = boundedInteger(body.slotInterval, "Appointment slot interval", { min: 1 });
+  const openingHours = ((body.openingHours as Record<string, unknown>[] | undefined) ?? []).map((row) => {
+    const day = boundedInteger(row.day, "Opening day", { min: 0, max: 6 });
+    const active = Boolean(row.active);
+    if (!active) return { day, active, open: null, close: null };
+    const open = text(row.open);
+    const close = text(row.close);
+    if (!isValidTime(open) || !isValidTime(close)) throw new ValidationError("Opening hours must use valid HH:mm times.");
+    if (timeToMinutes(close) <= timeToMinutes(open)) throw new ValidationError("Opening close time must be after open time.");
+    return { day, active, open, close };
+  });
+  return {
+    salonName: text(body.salonName),
+    address: text(body.address),
+    phone: text(body.phone),
+    email: text(body.email),
+    bookingNotice,
+    maximumBookingPeriod,
+    cancellationDeadline,
+    slotInterval,
+    openingHours,
+  };
 }
 
 export async function updateExpense(actor: InternalSession, id: string, body: Record<string, unknown>) {
@@ -559,6 +587,23 @@ function num(input: unknown) {
   const value = Number(input);
   if (!Number.isFinite(value) || value < 0) throw new ValidationError("Numeric value is invalid.");
   return value;
+}
+
+function boundedInteger(input: unknown, label: string, options: { min: number; max?: number }) {
+  const value = Number(input);
+  if (!Number.isInteger(value) || value < options.min || (options.max !== undefined && value > options.max)) {
+    throw new ValidationError(`${label} is invalid.`);
+  }
+  return value;
+}
+
+function isValidTime(input: string) {
+  return /^([01]\d|2[0-3]):[0-5]\d$/.test(input);
+}
+
+function timeToMinutes(input: string) {
+  const [hours, minutes] = input.split(":").map(Number);
+  return hours * 60 + minutes;
 }
 
 function int(input: unknown) {
